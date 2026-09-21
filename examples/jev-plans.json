@@ -1,0 +1,16 @@
+[
+  {
+    "id": "bass_at_phrase",
+    "outgoing_track_id": "outgoing",
+    "incoming_track_id": "incoming",
+    "technique": "phrase_bass_swap",
+    "timing": {"outgoing_takeover_id": "a_phrase", "incoming_takeover_id": "b_drop", "evidence": "Twee expliciete synthetische markeringen; geen gemeten timing"}
+  },
+  {
+    "id": "swap_at_drop",
+    "outgoing_track_id": "outgoing",
+    "incoming_track_id": "incoming",
+    "technique": "drop_swap",
+    "timing": {"outgoing_takeover_id": "a_drop", "incoming_takeover_id": "b_drop", "evidence": "Twee expliciete synthetische markeringen; geen gemeten timing"}
+  }
+]

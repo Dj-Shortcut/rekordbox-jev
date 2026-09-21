@@ -1,0 +1,219 @@
+{
+  "version": 2,
+  "authority": "Uitgeschreven technische instructies op basis van Crossfader; geen afgeleide persoonlijke smaakregels",
+  "purpose": "Zelfstandige uitleg voor Jev. De hele inhoud gaat mee in het API-verzoek; bronlinks dienen alleen voor herkomst.",
+  "provenance": "De muzikale techniekbeschrijvingen zijn korte eigen samenvattingen van Crossfader. Het gegevenscontract, de tijdrekening, controles en scheiding tussen plannen en uitvoeren hieronder zijn onze eigen technische uitwerking.",
+  "scope": {
+    "music_folder": "26"
+  },
+  "task": {
+    "role": "Kies een muzikaal samenhangend voorstel: trackpaar, techniek en overnamemoment samen.",
+    "planning_only": "Beoordeel hoe de overgang muzikaal zou passen. Het feit dat de uitvoerder nog uitstaat, is op zichzelf geen reden om een bruikbaar muzikaal plan af te wijzen.",
+    "limits": "Je hoort hier geen audio. Je krijgt beschrijvingen en meetgegevens. Een tracktitel of genrelabel is geen bewijs voor een vocal, drop, baslijn of cuepositie.",
+    "defer": "Kies defer wanneer de aangeboden voorstellen muzikaal niet passen, elkaar niet betekenisvol laten onderscheiden, of essentieel muzikaal bewijs missen. Benoemde technische uitvoerblokkades worden apart door de lokale code afgehandeld."
+  },
+  "control_meanings": {
+    "channel_fader": "Verandert het niveau van één deck. Een tussenstand in de UI is niet hetzelfde als een gemeten percentage van de hoorbare luidheid.",
+    "low_eq": "Verandert het lage frequentiegebied van een deck. Het is geen onafhankelijke bediening van alleen de bassynth of alleen de kick. De mapping kill/verminderd/neutraal moet lokaal bekend en bevestigd zijn.",
+    "crossfader": "Verdeelt de hoorbare bijdrage van toegewezen decks. Controleer lokaal de decktoewijzing en curve voordat een plan dit bedieningsmiddel gebruikt.",
+    "beat_sync": "Een sync-opdracht is een handeling; het resultaat moet gecontroleerd worden. Een gelijk BPM bewijst niet dat de beatposities samenvallen.",
+    "loop": "Herhaalt een gekozen muziekfragment. De looplocatie en -lengte horen bij een specifiek voorstel; activeren is geen standaardstap in elke overgang."
+  },
+  "required_music_evidence": {
+    "tracks": "Identiteit, originele en afgespeelde BPM, key indien bekend, duur, afspeelpositie en herkomst van deze waarden.",
+    "structure": "Benoemde cuepunten, frasegrenzen, breakdowns en drops met een track-ID, positie en bewijsbron. Tijdmarkeringen voor verschillende tracks hebben elk hun eigen tijdlijn.",
+    "arrangement": "Welke passages daadwerkelijk kick, bas, vocal, melodie of bruikbaar loopmateriaal bevatten. Vermeld onbekend als analyse ontbreekt.",
+    "relationship": "Welke passages volgens het voorstel samen klinken, welk materiaal de hoofdrol krijgt en op welk muzikaal moment die rol wisselt.",
+    "set_context": "Recent gespeelde tracks en bekende energieontwikkeling mogen de vergelijking beïnvloeden; verzin geen publiekreactie of persoonlijke smaak."
+  },
+  "selection_procedure": [
+    "Lees de muziekinformatie en de bronstatus. Houd gemeten feiten, analyses en onbekende waarden uit elkaar.",
+    "Lees elk aangeboden voorstel als één geheel. Wissel geen track, techniek of markering tussen twee voorstellen uit.",
+    "Zoek de volledige techniekbeschrijving in tutorial_guidance.techniques met de technique-ID van het voorstel.",
+    "Vergelijk het doel, de geschiktheid, de handelingen en de afwijsredenen van die techniek met de feitelijke passages die samen zouden klinken.",
+    "Controleer of de twee overnamemarkeringen bij de genoemde tracks horen en of het voorgestelde muzikale verband wordt ondersteund.",
+    "Kies het best onderbouwde muzikale voorstel. Gebruik defer als geen voorstel voldoende steun heeft. Een hogere confidence is geen vervanging voor ontbrekende metingen."
+  ],
+  "techniques": {
+    "phrase_bass_swap": {
+      "name": "EQ Swap op een frasewissel",
+      "tutorial_basis": "Crossfader — 3 Ways To Mix House Music, onderdeel EQ Swap",
+      "musical_goal": "Een duidelijke verandering van klank en energie binnen een doorgaande beatmix.",
+      "choose_when": "De passages ondersteunen een beatmix en een baswissel past op een bekende frasegrens.",
+      "steps": [
+        {
+          "phase": "voorbereiden",
+          "action": "Nieuwe kanaalfader dicht; nieuwe bas-EQ dicht; mid en hoog licht verminderen."
+        },
+        {
+          "phase": "binnenbrengen",
+          "action": "Start de nieuwe track in frase en breng zijn kanaalfader omhoog."
+        },
+        {
+          "phase": "eerste EQ-wissel",
+          "action": "Wissel hoog aan het begin van een viermatenstuk."
+        },
+        {
+          "phase": "overname",
+          "action": "Haal op de frasewissel de oude bas weg en zet de nieuwe bas in."
+        },
+        {
+          "phase": "afronden",
+          "action": "Wissel mid bij de volgende viermatensectie; verwijder de oude track op een volgende frasegrens."
+        }
+      ],
+      "reject_when": "De benodigde frases of de passendheid van de overlappende passages zijn niet bekend.",
+      "technical_translation": {
+        "required_controls": [
+          "channel_fader",
+          "low_eq",
+          "mid_eq",
+          "high_eq"
+        ],
+        "takeover_event": "phrase_start",
+        "clock_rule": "Gebruik de aangewezen frasegrens en de vastgestelde maatsoort; geen vaste secondenwacht."
+      },
+      "source": "https://blog.wearecrossfader.co.uk/blog/3-ways-to-mix-house-music/"
+    },
+    "drop_swap": {
+      "name": "Drop Swap",
+      "tutorial_basis": "Crossfader — How to mix EDM",
+      "musical_goal": "Een verrassende overname op de drop.",
+      "choose_when": "Breakdowns en opbouwen passen bij elkaar; de drops kunnen samenvallen.",
+      "steps": [
+        {
+          "phase": "voorbereiden",
+          "action": "Kies cuepunten die verschillen in opbouwlengte opvangen."
+        },
+        {
+          "phase": "opbouw",
+          "action": "Laat beide breakdowns in frase samenspelen."
+        },
+        {
+          "phase": "overname",
+          "action": "Verwijder de oude track wanneer de nieuwe drop valt."
+        },
+        {
+          "phase": "optioneel",
+          "action": "Een kort vocalaccent of effect kan de wissel aankleden."
+        }
+      ],
+      "reject_when": "De drops of opbouwlengtes ontbreken.",
+      "technical_translation": {
+        "required_controls": [
+          "cue",
+          "play",
+          "level_control"
+        ],
+        "takeover_event": "drop",
+        "optional_controls": [
+          "effect_or_vocal_accent"
+        ]
+      },
+      "source": "https://wearecrossfader.co.uk/blog/how-to-mix-edm/"
+    },
+    "loop_tightening": {
+      "name": "Loop Tightening",
+      "tutorial_basis": "Crossfader — How to mix EDM",
+      "musical_goal": "Spanning opbouwen vlak voor een drop.",
+      "choose_when": "Een herkenbare klank is geschikt voor herhaling.",
+      "steps": [
+        {
+          "phase": "voorbereiden",
+          "action": "Lijn de drops uit."
+        },
+        {
+          "phase": "spanning",
+          "action": "Maak vlak ervoor een uitgaande loop van één beat en verkort die."
+        },
+        {
+          "phase": "optioneel",
+          "action": "Echo of reverb kan het fragment verlengen."
+        },
+        {
+          "phase": "overname",
+          "action": "Stop het fragment wanneer de nieuwe drop inzet."
+        }
+      ],
+      "reject_when": "Een geschikt fragment of droppositie ontbreekt.",
+      "technical_translation": {
+        "required_controls": [
+          "loop_in",
+          "loop_length",
+          "level_control"
+        ],
+        "takeover_event": "drop",
+        "optional_controls": [
+          "echo",
+          "reverb"
+        ]
+      },
+      "source": "https://wearecrossfader.co.uk/blog/how-to-mix-edm/"
+    },
+    "drop_looping": {
+      "name": "Drop Looping",
+      "tutorial_basis": "Crossfader — How to mix EDM",
+      "musical_goal": "Uitgaand materiaal herkenbaar houden over een nieuwe drop.",
+      "choose_when": "Een vocal of synthfrase past over de nieuwe muziek.",
+      "steps": [
+        {
+          "phase": "voorbereiden",
+          "action": "Loop het fragment vóór de drop."
+        },
+        {
+          "phase": "opbouw",
+          "action": "Behoud het tijdens de nieuwe opbouw."
+        },
+        {
+          "phase": "accenten",
+          "action": "Breng het met korte crossfaderbewegingen in en uit de nieuwe drop."
+        },
+        {
+          "phase": "afronden",
+          "action": "Werk het fragment eventueel met een effect weg."
+        }
+      ],
+      "reject_when": "De passendheid of locatie van het fragment is onbekend.",
+      "technical_translation": {
+        "required_controls": [
+          "loop",
+          "crossfader"
+        ],
+        "takeover_event": "drop",
+        "optional_controls": [
+          "vinyl_brake",
+          "echo"
+        ]
+      },
+      "source": "https://wearecrossfader.co.uk/blog/how-to-mix-edm/"
+    }
+  },
+  "timing_contract": {
+    "musical_reference": "Een voorstel verwijst naar muziekmarkeringen, niet naar een vertraging na het starten van een script.",
+    "alignment": "De lokale planner moet de uitgaande en inkomende overnamemarkering op hetzelfde uitvoeringsmoment uitlijnen. Bij een tempoverandering moet hij tracktijd naar speeltijd omrekenen.",
+    "constant_tempo_example": "Als zowel het originele als het afgespeelde tempo constant is: speeltijd tussen twee trackposities = verschil in trackseconden × origineel BPM / afgespeeld BPM. Dit voorbeeld geldt niet blind voor variabel tempo of onjuiste analyse.",
+    "launch_time": "Het geplande startmoment van de inkomende track is het overnamemoment min de berekende speeltijd vanaf zijn gekozen cuepunt tot zijn overnamemarkering. Zonder cuepunt of tempo-informatie is dit nog niet uitvoerbaar.",
+    "units": "Gebruik expliciete eenheden: beat, maat, trackseconde en kloktijd. Alleen bij vastgestelde 4/4 bevat een maat vier beats. Een frase krijgt zijn lengte uit analyse, niet uit een algemene preset.",
+    "latency": "De uitvoerder moet voldoende voorbereidingsmarge hebben en zijn invoervertraging meten. Een API-antwoord of schermaflezing mag de uitvoeringsklok niet bepalen."
+  },
+  "execution_contract": {
+    "before_launch": [
+      "Beoogde tracks en cuepunten opnieuw controleren",
+      "Doeldeck, faders en EQ-standen bevestigen",
+      "Tempo en uitvoertijd opnieuw controleren"
+    ],
+    "before_audible_overlap": [
+      "Beatuitlijning controleren waar ritmische passages overlappen",
+      "Bevestigen dat het inkomende deck werkelijk speelt",
+      "De benodigde basverdeling en routing bevestigen"
+    ],
+    "at_takeover": [
+      "De handelingen van de gekozen techniek op de geplande muziekmarkering uitvoeren",
+      "Het uitgaande deck pas verwijderen wanneer de inkomende bijdrage bevestigd is"
+    ],
+    "on_uncertainty": "Een onbevestigde handeling niet blind herhalen. De uitvoerder moet actuele staat herstellen en continuïteit bewaken; hij mag een late planrespons niet zomaar alsnog uitvoeren.",
+    "current_implementation": "Deze adapter maakt nog geen bedieningsopdrachten. De controles hierboven zijn eisen voor de toekomstige uitvoerder, geen claim dat ze al werken."
+  },
+  "primary_source": "https://wearecrossfader.co.uk/blog/how-to-mix-edm/",
+  "eq_source": "https://blog.wearecrossfader.co.uk/blog/3-ways-to-mix-house-music/"
+}

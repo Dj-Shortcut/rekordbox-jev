@@ -1,0 +1,16 @@
+{
+  "provenance": "synthetic_example",
+  "music_scope": "26",
+  "notice": "Verzonnen voorbeeld voor het verzoekformaat; geen analyse van echte muziek en geen live Rekordbox-status.",
+  "tracks": {
+    "outgoing": {"title": "Voorbeeldtrack A", "music_scope": "26", "bpm": 128, "key": "Am", "description": "Instrumentale opbouw naar een ritmische frase", "current_position_seconds": 160},
+    "incoming": {"title": "Voorbeeldtrack B", "music_scope": "26", "bpm": 128, "key": "Am", "description": "Intro gevolgd door een drop met een duidelijke baslijn"}
+  },
+  "landmarks": {
+    "a_phrase": {"track_id": "outgoing", "kind": "phrase_start", "position_seconds": 192, "provenance": "synthetic_example", "evidence": "Verzonnen voor dit formaatvoorbeeld"},
+    "a_drop": {"track_id": "outgoing", "kind": "drop", "position_seconds": 224, "provenance": "synthetic_example", "evidence": "Verzonnen voor dit formaatvoorbeeld"},
+    "b_drop": {"track_id": "incoming", "kind": "drop", "position_seconds": 32, "provenance": "synthetic_example", "evidence": "Verzonnen voor dit formaatvoorbeeld"}
+  },
+  "beat_alignment": "unknown",
+  "execution": {"enabled": false, "purpose": "planning example only"}
+}
