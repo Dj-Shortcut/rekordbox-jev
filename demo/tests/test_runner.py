@@ -327,6 +327,60 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         runner._remember_verified({'decision':{'transport':'play_B'},'before_snapshot':before},{'snapshot':after})
         self.assertIsNone(runner.transition)
 
+    async def test_stop_env_failure_is_reported_but_does_not_raise(self):
+        class FailingStop(Environment):
+            async def stop(self):
+                self.stopped = True
+                raise RuntimeError('bridge quit unexpectedly')
+        runner, env, client, events = self.create(env=FailingStop())
+        task = asyncio.create_task(runner.run())
+        await until(lambda: bool(client.requests))
+        await asyncio.wait_for(runner.stop(), .05)
+        await asyncio.wait_for(task, .05)
+        self.assertTrue(env.stopped)
+        self.assertTrue(any(e['event'] == 'error' and e.get('stage') == 'stop' for e in events))
+
+    async def test_observe_failure_is_reported_and_the_loop_recovers(self):
+        class FlakyObserve(Environment):
+            async def observe(self):
+                self.observations += 1
+                if self.observations == 3:
+                    raise RuntimeError('native bridge socket closed')
+                await asyncio.sleep(.001)
+                return {'valid': True, 'version': self.title, 'title': self.title, 'observation': self.observations}
+        runner, env, client, events = self.create(env=FlakyObserve())
+        task = asyncio.create_task(runner.run())
+        await until(lambda: any(e['event'] == 'error' and e.get('stage') == 'observe' for e in events))
+        await until(lambda: env.observations > 6)
+        await runner.stop(); await task
+        self.assertTrue(env.stopped)
+
+    async def test_inference_failure_after_answer_is_reported_without_dispatch(self):
+        class FailingPolicy(Policy):
+            def resolve(self, request, response):
+                raise ValueError('malformed jev answer')
+        runner, env, client, events = self.create()
+        runner.policy = FailingPolicy()
+        task = asyncio.create_task(runner.run())
+        await until(lambda: any(e['event'] == 'error' and e.get('stage') == 'inference' for e in events))
+        self.assertEqual(env.executions, 0)
+        await runner.stop(); await task
+
+    async def test_prepare_failure_is_reported_and_looping_continues(self):
+        class FailingPrepare(Policy):
+            calls = 0
+            def prepare(self, snapshot, history, busy):
+                FailingPrepare.calls += 1
+                if FailingPrepare.calls == 1:
+                    raise ValueError('bad snapshot for prepare')
+                return super().prepare(snapshot, history, busy)
+        runner, env, client, events = self.create()
+        runner.policy = FailingPrepare()
+        task = asyncio.create_task(runner.run())
+        await until(lambda: any(e['event'] == 'error' and e.get('stage') == 'prepare' for e in events))
+        await until(lambda: bool(client.requests))
+        await runner.stop(); await task
+
     async def test_snapshot_version_is_preserved_and_sequence_is_runner_owned(self):
         runner, env, client, events = self.create(client=Client(delay=.1))
         task = asyncio.create_task(runner.run())
