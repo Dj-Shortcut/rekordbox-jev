@@ -38,8 +38,17 @@ private enum JevKeychain {
         var request = query
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
+        // A DJ test must not interrupt playback with a password dialog.
+        // This does not change or relax the Keychain item's access permissions.
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        request[kSecUseAuthenticationContext as String] = context
         var result: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary,&result)
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+            throw NSError(domain:"JevKeychain",code:Int(status),userInfo:[NSLocalizedDescriptionKey:
+                "macOS geeft de bewaarde sleutel niet automatisch vrij. Proef niet gestart; er wordt geen wachtwoordvenster geopend."])
+        }
         guard status == errSecSuccess else { throw error(status) }
         guard let data = result as? Data, let secret = String(data:data,encoding:.utf8), !secret.isEmpty else {
             throw error(errSecDecode)
@@ -58,6 +67,7 @@ final class JevControls: ObservableObject {
     let root: URL
     private var process: Process?
     private var stopRequested = false
+    private var sessionSecret: String?
 
     init(root: URL) {
         self.root = root
@@ -86,6 +96,7 @@ final class JevControls: ObservableObject {
                 try JevKeychain.save(secret)
                 DispatchQueue.main.async {
                     self?.savingKey = false; self?.hasKey = true; self?.editingKey = false
+                    self?.sessionSecret = secret
                     self?.status = "Sleutel bewaard. Klik op Start proef."
                 }
             } catch {
@@ -97,12 +108,17 @@ final class JevControls: ObservableObject {
     func start() {
         guard hasKey, !running, !savingKey else { return }
         running = true; stopRequested = false; status = "Sleutel ophalen…"
+        if let secret = sessionSecret {
+            activateRekordbox(secret:secret)
+            return
+        }
         DispatchQueue.global(qos:.userInitiated).async { [weak self] in
             do {
                 let secret = try JevKeychain.load()
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     if self.stopRequested { self.running = false; return }
+                    self.sessionSecret = secret
                     self.activateRekordbox(secret:secret)
                 }
             } catch {
@@ -141,7 +157,7 @@ final class JevControls: ObservableObject {
         do { try task.run() }
         catch { running = false; status = error.localizedDescription; return }
         process = task
-        status = "DJ-test loopt · één overgang"
+        status = "DJ-sessie loopt · blijft verder mixen"
         // Credentials travel only through the anonymous stdin pipe, never argv or a file.
         DispatchQueue.global(qos:.userInitiated).async { [weak self] in
             do {
@@ -207,7 +223,7 @@ struct JevControlView: View {
                 }
             }
             HStack {
-                Button { onStart(); controls.start() } label: { Label("Start DJ-test",systemImage:"play.fill") }
+                Button { onStart(); controls.start() } label: { Label("Start DJ",systemImage:"play.fill") }
                     .buttonStyle(.borderedProminent).tint(Color(red:0.2,green:0.65,blue:0.5))
                     .disabled(!controls.hasKey || controls.running || controls.savingKey || controls.editingKey)
                 if controls.running { Button("Stop",role:.destructive) { controls.stop() } }

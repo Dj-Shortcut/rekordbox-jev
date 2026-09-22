@@ -23,6 +23,7 @@ venv/
 *.aiff
 *.m4a
 *.png
+!assets/dj-jev-background.png
 *.jpg
 *.mp4
 rekordbox.xml

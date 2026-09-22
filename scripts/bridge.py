@@ -7,8 +7,9 @@ import socket
 import sys
 
 def request(payload):
+    payload = {**payload, "clientPID": os.getpid()}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(15)
+        connection.settimeout(60 if payload.get("command") in ("loadTrack", "loadChosenTrack", "djAuthorize") else 15)
         connection.connect(f"/private/tmp/rekordbox-bridge-{os.getuid()}/control.sock")
         connection.sendall(json.dumps(payload).encode() + b"\n")
         chunks = bytearray()

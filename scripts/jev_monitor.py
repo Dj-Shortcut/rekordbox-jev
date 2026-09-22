@@ -6,6 +6,8 @@ import tempfile
 import time
 import uuid
 
+WIDGET_EVENTS = Path(f'/private/tmp/rekordbox-bridge-{os.getuid()}/widget/evidence/jev-events')
+
 DEFAULT_EVENTS = Path(__file__).resolve().parents[1]/'evidence/jev-events'
 
 
@@ -20,6 +22,12 @@ def write_event(event, directory):
             json.dump(event, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write('\n')
         os.replace(temporary, directory/(event['id']+'.json'))
+        if directory.resolve() == DEFAULT_EVENTS.resolve():
+            try:
+                WIDGET_EVENTS.mkdir(parents=True,exist_ok=True,mode=0o700)
+                write_event(event,WIDGET_EVENTS)
+            except OSError:
+                pass
     finally:
         if temporary and temporary.exists():
             temporary.unlink()

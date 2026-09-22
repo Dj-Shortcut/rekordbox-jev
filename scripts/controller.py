@@ -7,10 +7,72 @@ import time
 from pathlib import Path
 from bridge import request
 
+
+class NativeCommandError(RuntimeError):
+    """A native rejection. Absence of proof of no input never permits retry."""
+    def __init__(self, message, *, code=None, commands_sent=None):
+        super().__init__(message)
+        self.code = code
+        self.commands_sent = commands_sent
+        self.retryable = False
+
+
+class PreDispatchRejected(NativeCommandError):
+    """A fresh observation may recover this rejection; no input was sent."""
+    def __init__(self, message, *, code):
+        super().__init__(message, code=code, commands_sent=False)
+        self.retryable = True
+
+
+def _raise_native_error(response):
+    message = response.get('error', 'Onbekende fout')
+    before_input = (response.get('errorKind') == 'pre_dispatch_guard'
+                    and response.get('commandsSent') is False)
+    code = response.get('code')
+    if (before_input and response.get('retryable') is True
+            and code in ('observation_stale', 'alignment_not_confirmed')):
+        raise PreDispatchRejected(message, code=code)
+    raise NativeCommandError(message, code=code,
+                             commands_sent=False if before_input else None)
+
+
+def _native_mix_guard_available(command):
+    # Do not cache across a Bridge restart. This cheap status call replaces the
+    # legacy screenshot only when the currently running native protocol proves
+    # that it performs the same alignment guard and a stricter freshness check.
+    response = request({'command':'status'})
+    status = response.get('result', {}) if response.get('ok') is True else {}
+    guards = status.get('nativeMixGuards') or {}
+    return (type(status.get('protocolVersion')) is int and status['protocolVersion'] >= 3
+            and guards.get('version') == 1
+            and guards.get('freshAlignmentBeforeInput') is True
+            and guards.get('typedPreDispatchRejections') is True
+            and guards.get('expectedTracksAndDeadline') is True
+            and (command != 'mixStep' or guards.get('mixStep') is True))
+
+
 def checked(payload):
+    command = payload.get('command')
+    guarded = command in ('crossfader','fader','eqPair','mixStep')
+    native_guard = _native_mix_guard_available(command) if guarded else False
+    if guarded and not native_guard and (command == 'mixStep' or
+            any(key in payload for key in ('expectedTracks','notAfterMonotonicNS'))):
+        raise NativeCommandError('Bijgewerkte Bridge met lokale track- en deadlinecontrole vereist; geen bediening.',
+                                 code='native_guard_unavailable', commands_sent=False)
+    if command in ('crossfader','fader') and not native_guard:
+        # Also protects legacy/demo clients while the native Bridge is being updated.
+        import music_context
+        from mix_safety import require_aligned
+        raw = request({'command':'observe','saveImage':True})
+        if not raw.get('ok'):
+            _raise_native_error(raw)
+        state = normalized_state(raw['result'])
+        if not state.get('mixer'):
+            state['mixer'] = music_context.read_frame()
+        require_aligned(state)
     response = request(payload)
     if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Onbekende fout"))
+        _raise_native_error(response)
     return response["result"]
 
 def normalized_state(raw):
@@ -27,10 +89,13 @@ def normalized_state(raw):
                       "timeDisplays": times,
                       "playingIndicator": raw.get("playingIndicators", {}).get(f"deck{number}"),
                       "fader": raw.get("faders", {}).get(f"deck{number}")})
-    return {"source": "local screenshot and OCR", "observationMS": raw["observationMS"],
+    state = {"source": "local screenshot and OCR", "observationMS": raw["observationMS"],
             "sampledAtMonotonicNS": raw["sampledAtMonotonicNS"],
             "folder": raw.get("browserHeading"), "decks": decks,
             "layoutCalibrated": raw["layoutCalibrated"]}
+    if isinstance(raw.get('mixer'), dict):
+        state['mixer'] = raw['mixer']
+    return state
 
 def observe():
     return normalized_state(checked({"command": "observe"}))
@@ -70,7 +135,7 @@ def playback(deck, play):
                          deck_state(s, deck)["playingIndicator"] == play)
     return state
 
-def load(deck, filename):
+def load(deck, filename, *, search=False):
     """Send once, then require the intended title in two successive observations."""
     inventory = json.loads((Path(__file__).resolve().parents[1] / "evidence/inventory.json").read_text())
     track = next((t for t in inventory["tracks"] if t["file"] == filename), None)
@@ -81,7 +146,7 @@ def load(deck, filename):
     if state["folder"] != "26" or item["playingIndicator"] is not False:
         raise RuntimeError("Open map 26 en gebruik een stilstaand doeldeck.")
     expected = track.get("title") or Path(filename).stem
-    checked({"command": "loadVisible", "deck": deck, "file": filename})
+    checked({"command": "loadTrack" if search else "loadVisible", "deck": deck, "file": filename})
     matches = 0
     def confirmed(state):
         nonlocal matches

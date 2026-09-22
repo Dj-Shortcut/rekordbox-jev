@@ -1,3 +1,29 @@
+# Credential-host compatibility entry; the new demo imports no legacy DJ code.
+if __name__ == '__main__':
+    import sys as _demo_sys
+    import json as _demo_json
+    import pathlib as _demo_paths
+    _demo_root = _demo_paths.Path(__file__).resolve().parents[1]
+    _demo_config = _demo_root / 'config/live_trial.json'
+    if (_demo_config.exists() and _demo_json.loads(_demo_config.read_text()).get('implementation') == 'doom_demo'
+            and '--dj-test' in _demo_sys.argv and '--legacy-control' not in _demo_sys.argv):
+        import fcntl as _demo_fcntl
+        with (_demo_root / 'evidence/jev-reactive.lock').open('w') as _demo_lock:
+            _demo_fcntl.flock(_demo_lock, _demo_fcntl.LOCK_EX | _demo_fcntl.LOCK_NB)
+            if '--key-stdin' not in _demo_sys.argv:
+                raise SystemExit('Start DJ Jev via de widget; geen nieuwe sleutel nodig.')
+            _demo_key = _demo_sys.stdin.readline(4098).rstrip('\r\n')
+            if not _demo_key or len(_demo_key)>4096 or any(ord(c)<32 for c in _demo_key):
+                raise SystemExit('De bestaande sleutel is niet beschikbaar.')
+            _demo_source = _demo_root / 'demo'
+            if not (_demo_source / 'djjev/main.py').is_file():
+                _demo_source = _demo_root.parent / 'dj-jev-demo'
+            _demo_sys.path.insert(0,str(_demo_source))
+            from djjev.main import run as _demo_run
+            _demo_result = _demo_run(_demo_key)
+            print(_demo_json.dumps(_demo_result,ensure_ascii=False),flush=True)
+            raise SystemExit(0)
+
 #!/usr/bin/env python3
 """Short closed-loop Jev trial: observe -> choose one control -> apply -> observe."""
 import argparse
@@ -353,6 +379,7 @@ def main():
     key_source.add_argument('--key-stdin', action='store_true', help='Ontvang de sleutel via een anonieme pipe van de widget.')
     parser.add_argument('--cycles', type=int, choices=range(1, 4), default=3)
     parser.add_argument('--dj-test', action='store_true')
+    parser.add_argument('--legacy-control', action='store_true', help='Expliciete CLI-keuze voor oude bedieningsproeven; nooit door de widget gebruikt.')
     args = parser.parse_args()
     root = ROOT/'evidence'
     root.mkdir(exist_ok=True)
@@ -379,7 +406,33 @@ def main():
                 code = 0
                 try:
                     if args.dj_test:
-                        trial(key, args.cycles, root, dj_test=True)
+                        implementation_file = ROOT/'config/live_trial.json'
+                        implementation = json.loads(implementation_file.read_text()) if implementation_file.exists() else {}
+                        if not args.legacy_control and implementation.get('implementation') not in ('dj_set', 'contextual_observer', 'contextual_start_trial'):
+                            raise RuntimeError('De huidige widgetproef is niet ingesteld. Er is geen oude mixtest gestart.')
+                        if implementation.get('implementation') == 'dj_set':
+                            import dj_set
+                            result = dj_set.run(key)
+                            if result.get('status') == 'blocked':
+                                raise RuntimeError(result.get('error', 'De bediening is onderbroken.'))
+                        elif implementation.get('implementation') == 'contextual_observer':
+                            import contextual_live
+                            contextual_live.run(key)
+                        elif implementation.get('implementation') == 'contextual_start_trial':
+                            import contextual_session
+                            result = contextual_session.run(key)
+                            if result.get('status') != 'opening_playing_next_chosen':
+                                raise RuntimeError(result.get('error', 'De openingsproef is niet voltooid.'))
+                        elif implementation.get('implementation') == 'continuous_session':
+                            import playground_live, dj_session
+                            playground_live.configure_key(key)
+                            dj_session.run()
+                        elif implementation.get('implementation') == 'playground_live':
+                            import playground_live
+                            playground_live.configure_key(key)
+                            playground_live.live()
+                        else:
+                            trial(key, args.cycles, root, dj_test=True)
                     else:
                         trial(key, args.cycles, root)
                 except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:

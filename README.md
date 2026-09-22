@@ -1,3 +1,15 @@
+> Actieve ontwikkeling, 22 september: [de nieuwe DJ Jev-kern staat in `demo/`](demo/README.md). `config/live_trial.json` kiest `doom_demo`; de widget start via de bestaande sleutelhouder deze nieuwe kern. De kern importeert geen oude DJ-planner of sessielus. De laatste beoordeelde live run voerde drie opeenvolgende autonome overdrachten inclusief EQ-herstel uit en bleef verder draaien; de gebruiker heeft de proef geslaagd verklaard en laten stoppen.
+
+Daarna zijn rustigere muzikale voorkeuren toegevoegd: later inzetten en langere blends, met ongeveer 32 maten als uitgangspunt. Deze wijziging is lokaal gecontroleerd en nog niet opnieuw beluisterd. Zie de [actuele werking, timing en testresultaten](demo/README.md) voor de details. De widget bevat de meegeleverde transparante achtergrondafbeelding in `assets/dj-jev-background.png`.
+
+De actieve bestanden zijn `demo/djjev/runner.py` (gelijktijdig lezen, Jev en bediening), `policy.py` (de echte vragen en antwoorden), `environment.py` (native opdrachten en controle) en `state.py` (uitlezing). `Sources/Bridge.swift`, `TrackTransport.swift` en `FastObservation.swift` bevatten de fysieke macOS-koppeling. `JevProbeControls.swift` start de reeds draaiende sleutelhouder; de huidige widget leest zelf geen sleutel.
+
+Offline controles van de nieuwe kern: `cd demo && python3 -m unittest discover -s tests`. Deze controles bedienen Rekordbox niet en bewijzen geen echte set. Alle bestanden hieronder buiten `demo/` die oude DJ-keuzes bevatten, blijven uitsluitend als ontwikkelgeschiedenis aanwezig.
+
+## Historische overdracht van 21 september
+
+De volgende status en startinstructies beschrijven de oudere implementatie, niet de actieve `doom_demo`-route.
+
 # Rekordbox + Jev — experimenteel prototype
 
 Privé-overdracht voor menselijke hulp, 21 september 2026. Dit is een opgeschoonde broncodekopie van de lokale ontwikkeling. **Nog geen betrouwbaar autonome DJ.** De bestaande geïnstalleerde apps zijn niet gewijzigd bij deze overdracht.
