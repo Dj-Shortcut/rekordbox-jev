@@ -12,6 +12,15 @@ BANDS = ('trim', 'high', 'mid', 'low')
 ENDPOINT_TOLERANCE = .02  # Same visual endpoint tolerance as closeStoppedDeck.
 
 
+def cross_closed(snapshot, deck):
+    cross = snapshot['mixer']['cross']
+    return cross >= 1-ENDPOINT_TOLERANCE if deck == 'A' else cross <= ENDPOINT_TOLERANCE
+
+
+def closed(snapshot, deck):
+    return snapshot['decks'][deck]['channel'] <= .01 or cross_closed(snapshot, deck)
+
+
 def number(value, low=None, high=None):
     return (type(value) in (int, float) and math.isfinite(value)
             and (low is None or value >= low) and (high is None or value <= high))

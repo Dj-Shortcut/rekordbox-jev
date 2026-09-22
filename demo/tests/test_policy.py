@@ -396,6 +396,26 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(policy.applicable(decision,s,[]))
         with self.assertRaises(ValueError):policy.prepare(s,[],False)
 
+    def test_applicable_rejects_load_choice_whose_track_is_no_longer_a_candidate(self):
+        s=snapshot();request=policy.prepare(s,[],False)
+        chosen=library()[2]['id']
+        decision=policy.resolve(request,response(request,transport='load_A',next_track=chosen))
+        self.assertTrue(policy.applicable(decision,s,[]))
+        # Same snapshot and expected titles, but a verified action elsewhere has
+        # since recorded that track as recent: it is still load_A, just not it.
+        later_history={'recent_tracks':[chosen]}
+        self.assertIn('load_A',policy.prepare(s,later_history,False)['questions']['transport']['criteria'])
+        self.assertFalse(policy.applicable(decision,s,later_history))
+
+    def test_applicable_returns_false_instead_of_raising_on_malformed_decision(self):
+        frame=loaded(loaded(raw(),playing=True),'B',1,True)
+        frame['mixer'].update(red_bar_aligned=True,crossfader_position=.5)
+        s=snapshot(frame)
+        request=policy.prepare(s,[],False)
+        decision=policy.resolve(request,response(request,transport='mix',crossfader='A',bass='B',duration='beats8'))
+        del decision['duration_beats']
+        self.assertFalse(policy.applicable(decision,s,[]))
+
     def test_normalization_distinguishes_empty_unknown_and_eq_neutral(self):
         s=snapshot();self.assertTrue(s['valid']);self.assertIsNone(s['decks']['A']['track_id'])
         frame=raw();frame['decks'][0]['title']=''

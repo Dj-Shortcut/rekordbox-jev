@@ -1,7 +1,7 @@
 """Independent Jev questions over one observed DJ state. No physical controls."""
 from copy import deepcopy
 import time
-from .state import BANDS, ENDPOINT_TOLERANCE, cue_offset, number, text
+from .state import BANDS, closed as _closed, cross_closed as _cross_closed, cue_offset, number, text
 from .musical_timing import context as musical_timing
 
 PITCH = {'C':0,'B#':0,'C#':1,'Db':1,'D':2,'D#':3,'Eb':3,'E':4,'Fb':4,'F':5,
@@ -59,15 +59,6 @@ def _harmonic(a, b):
     a, b = key(a), key(b)
     return a[0] is not None and b[0] is not None and ((b[0]-a[0]) % 12 in (0,5,7)
         if a[1] == b[1] else (a[0]+(3 if a[1] else 9)) % 12 == b[0])
-
-
-def _closed(snapshot, name):
-    return snapshot['decks'][name]['channel'] <= .01 or _cross_closed(snapshot, name)
-
-
-def _cross_closed(snapshot, name):
-    cross = snapshot['mixer']['cross']
-    return cross >= 1-ENDPOINT_TOLERANCE if name == 'A' else cross <= ENDPOINT_TOLERANCE
 
 
 def _non_bass_neutral(deck):

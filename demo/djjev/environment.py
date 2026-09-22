@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import time
-from .state import normalize, read_library, number, ENDPOINT_TOLERANCE
+from .state import normalize, read_library, number, closed, cross_closed, ENDPOINT_TOLERANCE
 from .events import emit, native_parameters, native_result_summary, snapshot_summary
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -247,13 +247,6 @@ class Rekordbox:
             if name == 'mixGesture' and result.get('verified') is not True:
                 raise RuntimeError('De volledige mixbeweging is niet bevestigd; niet herhaald.')
             return result
-
-        def closed(s,d):
-            return s['decks'][d]['channel'] <= .01 or cross_closed(s,d)
-
-        def cross_closed(s,d):
-            value=s['mixer']['cross']
-            return value >= 1-ENDPOINT_TOLERANCE if d=='A' else value <= ENDPOINT_TOLERANCE
 
         async def reset(d, bands=None):
             bands=['low','mid','high','trim'] if bands is None else bands
