@@ -3,8 +3,8 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
-import time
 import unicodedata
+from .clock import bridge_ns
 from .state import read_library
 from .audio_timeline import load_cached
 
@@ -33,7 +33,7 @@ async def prepare_library(native, display, *, root, bridge, music_root=None):
     imported=False
     for attempt in range(6):
         result=await native.call('control','refreshLibrary',importFolder26=imported and attempt==1,
-            notAfterMonotonicNS=time.monotonic_ns()+85_000_000_000)
+            notAfterMonotonicNS=bridge_ns()+85_000_000_000)
         export=Path(result.get('path','')).resolve()
         if result.get('verified') is not True or export.parent!=(bridge/'evidence/library').resolve():
             raise RuntimeError('Rekordbox-export niet bevestigd; geen verouderde lijst gebruikt.')

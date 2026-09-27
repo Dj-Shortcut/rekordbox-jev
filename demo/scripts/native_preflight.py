@@ -3,8 +3,8 @@ import asyncio
 import json
 from pathlib import Path
 import sys
-import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from djjev.clock import bridge_ns
 from djjev.environment import Native, ROOT
 
 
@@ -28,7 +28,7 @@ async def main():
                 item = {'role': role, 'fast': True if role == 'observer' else fast,
                         'calibrated': frame.get('layoutCalibrated'),
                         'observationMS': frame.get('observationMS'),
-                        'ageMS': (time.monotonic_ns()-frame['sampledAtMonotonicNS'])/1e6,
+                        'ageMS': (bridge_ns()-frame['sampledAtMonotonicNS'])/1e6,
                         'timing': frame.get('timing'), 'decks': frame.get('decks')}
                 results.append(item)
                 print(json.dumps(item, ensure_ascii=False), flush=True)
