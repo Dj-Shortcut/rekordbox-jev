@@ -7,6 +7,9 @@ from .audio_timeline import transition_context, evidence_token
 from .dj_context import attach as attach_dj_context
 from .entry_timing import attach_questions, launch_consistent
 from .eq import BASS_TARGETS, TONE_TARGETS, readable, reached
+from .transition_budget import COMPLETION_MARGIN_SECONDS, FINAL_CLEANUP_RESERVE_SECONDS
+from .arrangement import attach_question as attach_arrangement_question
+from .entry_grid import attach_question as attach_entry_slot, chosen_target, target_current
 
 PITCH = {'C':0,'B#':0,'C#':1,'Db':1,'D':2,'D#':3,'Eb':3,'E':4,'Fb':4,'F':5,
          'E#':5,'F#':6,'Gb':6,'G':7,'G#':8,'Ab':8,'A':9,'A#':10,'Bb':10,'B':11,'Cb':11}
@@ -33,7 +36,9 @@ PACING = ('FOLDER-26 ENTRY PREFERENCE: xxx____xxxxxx_____xxxxxx; prefer starting
          'the last suitable sustained kick return, after the main high point. Read '
          'musical_timing.entry_preference. Its candidate is measured low-band/attack activity, not '
          'proof of kicks or a climax. Assess all earlier and later sections, and reject misleading candidates. '
-         'When plausible and suitable, wait for that return even beyond the final-quarter fallback. '
+         'When plausible, suitable and enough_time_for_short_mix is true, wait for that return even '
+         'beyond the final-quarter fallback. Otherwise use the fallback and its urgency. '
+         'Budget launch/alignment separately from the 30-second completion reserve. '
          'A seven-minute song may keep playing on its own until its late musical entry. '
          'Do not start early merely to fit the preferred 64 bars; shorten the mix to the candidate budget. '
          'If the candidate is too late to preserve continuity, begin earlier with a shorter mix. '
@@ -50,7 +55,9 @@ PACING = ('FOLDER-26 ENTRY PREFERENCE: xxx____xxxxxx_____xxxxxx; prefer starting
          'incoming intro is a reason to start it. PLAY starts a time-limited successor from its beginning: '
          'do not launch it minutes early and let its intro run out while waiting. '
          'After preparation and EQ cleanup, normally HOLD while seconds_until_preferred_launch_window '
-         'is positive. Without reliable arrangement evidence, use the final-quarter fallback in '
+         'is positive, EXCEPT when an agreed entry_slot is armable: choose PLAY 3–8 seconds ahead '
+         'so native control can wait for that selected beat. Never wait until an agreed point passes '
+         'before requesting its start. Without reliable arrangement evidence, use the final-quarter fallback in '
          'launch_window_remaining_seconds and launch_progress_floor_preference. These are musical '
          'pacing preferences, not proof a climax has happened. An earlier opportunity needs reliable '
          'evidence of a developed outgoing passage relaxing, not merely a convenient local change, '
@@ -418,7 +425,7 @@ def prepare(snapshot, history=None, busy=False):
                                  'criteria': {k:f'{v} beats for this gesture.' for k,v in DURATIONS.items()}}
     handoff_due = bool(not busy and aligned and transition
         and not transition['handoff_endpoint_reached']
-        and number(transition['outgoing_remaining_seconds'],0,30)
+        and number(transition['outgoing_remaining_seconds'],0,COMPLETION_MARGIN_SECONDS)
         and 'mix' in transport)
     if handoff_due:
         incoming=transition['incoming']
@@ -428,8 +435,19 @@ def prepare(snapshot, history=None, busy=False):
         for band in ('mid','high'):
             if band in questions:
                 questions[band]['criteria']={'hold':'Keep tone unchanged while completing the handoff.'}
-        questions['duration']['criteria']={k:v for k,v in questions['duration']['criteria'].items() if DURATIONS[k]<=4}
+        # Completion priority is not automatically a cut. Keep a flowing
+        # 8/16-beat sweep when both clocks leave room for verification/cleanup.
+        # Very short clocks retain the existing 2/4-beat rescue options.
+        remaining = min(d['remaining'] for d in decks.values()) if all(
+            number(d['remaining'],0) for d in decks.values()) else None
+        bpm = decks['A']['bpm']
+        smooth = {k:v for k,v in questions['duration']['criteria'].items()
+                  if DURATIONS[k]>=8 and number(remaining,0) and number(bpm,60,200)
+                  and DURATIONS[k]*60/bpm <= min(12.,remaining-FINAL_CLEANUP_RESERVE_SECONDS)}
+        questions['duration']['criteria'] = smooth or {
+            k:v for k,v in questions['duration']['criteria'].items() if DURATIONS[k]<=4}
         questions['transport']['instructions'] += ' The remaining clock is inside the 30-second completion margin. Only completing the existing handoff is offered; this does not start a new mix.'
+        questions['duration']['instructions'] += ' Completion priority still allows a smooth sweep when it fits above the final cleanup reserve; short rescue options appear only when that time is unavailable.'
     prepared = [n for n in decks if playing and 'play_'+n in transport and _closed(snapshot,n) and not decks[n]['playing']]
     countdown = (max(decks[n]['remaining'] for n in audible)
                  if audible and all(number(decks[n]['remaining'],0) for n in audible) else (None if audible else 0.))
@@ -473,6 +491,8 @@ def prepare(snapshot, history=None, busy=False):
                     'You choose the action; physical safety and remaining-time continuity still apply. '
                     + request['questions'][name]['instructions'])
     attach_questions(request)
+    attach_arrangement_question(request)
+    attach_entry_slot(request)
     attach_dj_context(request, snapshot)
     return request
 
@@ -497,6 +517,9 @@ def resolve(request, response):
         'duration_beats':DURATIONS[answers['duration']['choice']] if mixing else 0,
         'answers':deepcopy(answers)}
     transition=request['state'].get('transition')
+    entry_target = chosen_target(request, answers)
+    if entry_target is not None:
+        decision['entry_target'] = entry_target
     if mixing and transition and not transition['handoff_endpoint_reached']:
         decision['completion_outgoing']=transition['outgoing']
     if decision['transport'].startswith('load_'):
@@ -538,6 +561,8 @@ def applicable(decision, snapshot, history=None):
                         or abs(moved-expected) > .35):
                     return False  # Same-bar seek, allowing OCR clock quantization.
         fresh_request=prepare(snapshot,history,False)
+        if decision.get('entry_target') and not target_current(decision['entry_target'],snapshot):
+            return False
         if not launch_consistent(decision, fresh_request['state']['musical_timing']):
             return False
         fresh=fresh_request['questions']
@@ -548,7 +573,8 @@ def applicable(decision, snapshot, history=None):
             return False
         moving=any(decision.get(k,'hold')!='hold' for k in ('crossfader','bass','mid','high'))
         return (type(decision.get('snapshot_version')) is int and decision['snapshot_version']<=snapshot['version']
-                and (not moving or (type(decision['duration_beats']) is int and decision['duration_beats'] in DURATIONS.values()))
+                and (not moving or (type(decision['duration_beats']) is int
+                     and decision['duration_beats'] in {DURATIONS[k] for k in fresh.get('duration',{}).get('criteria',{})}))
                 and not (decision['transport']!='mix' and moving))
     except (KeyError,TypeError,ValueError):
         return False

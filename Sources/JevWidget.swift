@@ -227,6 +227,13 @@ private struct Inspector: View {
                 "A_cut":band + " A verder terug", "B_cut":band + " B verder terug"][choice]
     }
     private func timingChoiceLabel(_ choice: String, id: String) -> String? {
+        if id == "entry_slot" {
+            return choice == "fallback" ? "Ander passend inzetmoment" : "Inzet op " + choice.uppercased()
+        }
+        if id == "arrangement_fit" {
+            return ["supported":"Naar mogelijke drop opbouwen", "alternative":"Andere overgang nodig",
+                    "unknown":"Arrangement onzeker"][choice]
+        }
         guard ["kick_pattern","last_section","post_peak","entry_fit"].contains(id) else { return nil }
         return ["plausible":"Kickpatroon aannemelijk", "unclear":"Patroon onzeker",
                 "supported":"Laatste kicksectie aannemelijk", "unsuitable":"Geen geschikt moment",
@@ -260,7 +267,8 @@ private struct Inspector: View {
         return labels[choice] ?? optionLabel(choice,question:object(run.questions[id]),run:run)
     }
     private func compactQuestion(_ id: String, _ question: Object) -> String {
-        let labels = ["kick_pattern":"Waar keren de kicks terug?", "last_section":"Is dit de laatste kicksectie?", "post_peak":"Is het hoogtepunt voorbij?", "entry_fit":"Past inmixen op dit moment?", "mid":"Ruimte maken in het midden?", "high":"Hoe helder mag het klinken?", "bass":"Hoe wisselt de bass?", "levels":"Faders bewegen?", "transport":"Wat doet Jev nu?",
+        if id == "entry_slot" { return "Bij starten: welk inzetpunt?" }
+        let labels = ["arrangement_fit":"Past opbouwen naar de inkomende drop?", "kick_pattern":"Waar keren de kicks terug?", "last_section":"Is dit de laatste kicksectie?", "post_peak":"Is het hoogtepunt voorbij?", "entry_fit":"Past inmixen op dit moment?", "mid":"Ruimte maken in het midden?", "high":"Hoe helder mag het klinken?", "bass":"Hoe wisselt de bass?", "levels":"Faders bewegen?", "transport":"Wat doet Jev nu?",
                       "track":"Welk nummer volgt?", "opening_track":"Welk nummer starten?", "next_track":"Welk nummer volgt?", "action":"Wat doet Jev nu?", "dj_action":"Wat doet Jev nu?", "gesture":"Hoe snel deze beweging?", "duration":"Hoe snel deze beweging?", "crossfader":"Waarheen met de fader?", "length":"Hoe lang mixen?"]
         let instructions = object(question["instructions"])
         let task = string(instructions["task"]).isEmpty ? string(question["instructions"]) : string(instructions["task"])
@@ -302,9 +310,9 @@ private struct Inspector: View {
         return id == "next_track" && (transport["load_A"] != nil || transport["load_B"] != nil)
     }
     private func orderedQuestions(_ run: Run) -> [String] {
-        let order = ["kick_pattern":0,"last_section":1,"post_peak":2,"entry_fit":3,"transport":4,"next_track":5,"crossfader":6,"bass":7,"mid":8,"high":9,"duration":10]
+        let order = ["kick_pattern":0,"last_section":1,"post_peak":2,"entry_fit":3,"arrangement_fit":4,"entry_slot":5,"transport":6,"next_track":7,"crossfader":8,"bass":9,"mid":10,"high":11,"duration":12]
         return run.questions.keys.sorted {
-            let a = order[$0] ?? 11, b = order[$1] ?? 11
+            let a = order[$0] ?? 13, b = order[$1] ?? 13
             return a == b ? $0 < $1 : a < b
         }
     }
@@ -515,6 +523,17 @@ private struct Inspector: View {
                 Text("Geen duidelijke laatste kicksectie · terugval op resterende tijd")
                     .font(.system(size:12)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
             }
+            let timing = object(run.state["musical_timing"])
+            let grid = object(timing["entry_grid"])
+            if let preferred = grid["selected_preference"] as? String {
+                Text("Voorkeur " + preferred.uppercased() + " · 8 beats / 2 maten per punt")
+                    .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+            }
+            let arrangement = object(timing["arrangement"])
+            if let seconds = arrangement["seconds_to_incoming_drop"] as? Double, seconds > 0 {
+                Text("Mogelijke inkomende drop over " + clockLabel(seconds) + " · schatting")
+                    .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+            }
             Text(executionLabel(run)).font(.system(size:12,weight:.medium)).foregroundStyle(mint)
                 .fixedSize(horizontal:false,vertical:true)
             if !run.error.isEmpty { Text(run.error).font(.system(size:11)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true) }
@@ -528,7 +547,8 @@ private struct Inspector: View {
         let probability = object(answer["probabilities"])[choice] as? Double
         let transport = string(run.answer("transport")["choice"])
         let unused = !transport.isEmpty && ((isMixBranch(id,run:run) && transport != "mix") ||
-            (isLoadBranch(id,run:run) && !["load_A","load_B"].contains(transport)))
+            (isLoadBranch(id,run:run) && !["load_A","load_B"].contains(transport)) ||
+            (id == "entry_slot" && !["play_A","play_B"].contains(transport)))
         let tint = unused ? muted : mint
         VStack(alignment:.leading,spacing:5) {
             VStack(alignment:.leading,spacing:4) {

@@ -80,7 +80,9 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(before['lookahead'][0]['low_energy_dbfs_estimate'],-20)
         self.assertEqual(before['changes'][0]['in_bars'],0.)
         self.assertIn('low_band_rising',before['changes'][0]['observations'])
-        self.assertNotIn('drop',json.dumps(before))
+        self.assertFalse(before['first_drop']['drop_confirmed'])
+        self.assertIsNone(before['first_drop']['candidate'])  # Bass rise alone is not a drop.
+        self.assertEqual(before['source_grid'],self.docs[0]['grid'])
 
     def test_end_coverage_and_invalid_position_are_explicit(self):
         end=self.docs[0]['duration_seconds']

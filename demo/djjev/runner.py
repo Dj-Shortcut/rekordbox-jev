@@ -147,7 +147,8 @@ class Runner:
             if control=='mix':
                 self.transition['last_verified_mix']={k:decision.get(k) for k in ('crossfader','bass','mid','high','duration_beats')}
                 # Count actual audible overlap, never the earlier muted start.
-                # Conservatively start at the verified after-frame, not dispatch;
+                # Conservatively start at a verified frame, not dispatch. The
+                # first center movement can be confirmed before later EQ work;
                 # a closed route, pause, seek or alignment invalidates old timing.
                 for frame in (after,):
                     if self._identities(frame)!=self.transition['identities']:
@@ -159,6 +160,18 @@ class Runner:
                             and type(stamp) is int and stamp>0
                             and all(frame['decks'][n].get('playing') is True
                                     and number(frame['decks'][n].get('channel'),.9,1) for n in ('A','B'))):
+                        first=result.get('blend_confirmation')
+                        before=context.get('before_snapshot') or {}
+                        first_stamp=first.get('captured_ns') if isinstance(first,dict) else None
+                        if (type(before.get('captured_ns')) is int and type(first_stamp) is int
+                                and before['captured_ns']<=first_stamp<=stamp
+                                and self._identities(first)==self.transition['identities']
+                                and first.get('mixer',{}).get('aligned') is True
+                                and number(first['mixer'].get('cross'),ENDPOINT_TOLERANCE,1-ENDPOINT_TOLERANCE)
+                                and ENDPOINT_TOLERANCE<first['mixer']['cross']<1-ENDPOINT_TOLERANCE
+                                and all(first['decks'][n].get('playing') is True
+                                        and number(first['decks'][n].get('channel'),.9,1) for n in ('A','B'))):
+                            stamp=first_stamp
                         self.transition.setdefault('audible_mix_started_ns',stamp)
                         break
 
@@ -178,6 +191,8 @@ class Runner:
                     and all(after['decks'][n].get('playing') is True for n in ('A','B'))):
                 self.transition={'incoming':incoming,'outgoing':outgoing,'identities':identity,
                     'source':source, 'started_snapshot_version':before.get('version')}
+                if context['decision'].get('entry_target'):
+                    self.transition['entry_target']=deepcopy(context['decision']['entry_target'])
 
     def _retire_pending_request(self):
         """Cancel an obsolete request; drain it before allowing a fresh request."""

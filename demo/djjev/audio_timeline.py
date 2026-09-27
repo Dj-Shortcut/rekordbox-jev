@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .state import number, track_id
 from .entry_timing import activity_sections
+from .arrangement import first_drop_evidence
 
 SCHEMA_VERSION = 1
 DEFAULT_CACHE = Path(__file__).resolve().parents[1] / '.audio-cache'
@@ -228,8 +229,10 @@ class TimelineStore:
         for track in library:
             doc = load_cached(track, root/track['file'], cache_dir)
             if doc:
+                structure = activity_sections(doc['windows'])
                 self.timelines[track['id']] = (doc, [row['start_seconds'] for row in doc['windows']],
-                                               source_contour(doc['windows']), activity_sections(doc['windows']))
+                                               source_contour(doc['windows']), structure,
+                                               first_drop_evidence(doc['windows'], structure))
 
     def lookup(self, deck):
         identity = deck.get('track_id')
@@ -237,7 +240,7 @@ class TimelineStore:
         unavailable = {'status': 'missing_analysis', 'track_id': identity}
         if not found:
             return unavailable
-        doc, starts, contour, entry = found
+        doc, starts, contour, entry, first_drop = found
         grid = doc['grid']
         position = deck.get('elapsed')
         if not number(position, 0) or position >= doc['duration_seconds']:
@@ -261,6 +264,8 @@ class TimelineStore:
                 'position_seconds': position,
                 'position_bar': round((position-grid['start_seconds'])/grid['bar_seconds'], 3),
                 'entry_structure': deepcopy(entry),
+                'source_grid': deepcopy(grid),
+                'first_drop': deepcopy(first_drop),
                 'clock_basis': 'rekordbox_6.8.7_elapsed_source_seconds',
                 'tempo_ratio': round(deck['bpm']/grid['bpm'], 5),
                 'position_region': 'before_first_downbeat' if index < 0 else 'analyzed_window',

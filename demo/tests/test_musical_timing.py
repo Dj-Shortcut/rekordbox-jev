@@ -40,7 +40,7 @@ class MusicalTimingTests(unittest.TestCase):
             self.assertEqual(decision['transport'],transport)
 
     def test_late_window_and_urgent_end_do_not_wait_for_preferred_mix_length(self):
-        for remaining,urgent in ((75,False),(25,True)):
+        for remaining,urgent in ((75,True),(25,True)):
             state=self.prepared(elapsed=300-remaining,remaining=remaining)
             request=policy.prepare(state)
             timing=request['state']['musical_timing']
@@ -71,8 +71,8 @@ class MusicalTimingTests(unittest.TestCase):
         anchor['audible_mix_started_ns']=state['captured_ns']-20_000_000_000
         timing=policy.prepare(state,{'transition':anchor})['state']['musical_timing']
         self.assertFalse(timing['ending_needs_priority'])
-        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],28)
-        self.assertGreater(timing['seconds_to_preferred_overlap'],28)
+        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],10)
+        self.assertGreater(timing['seconds_to_preferred_overlap'],10)
         state['decks']['A']['remaining']=10
         self.assertTrue(policy.prepare(state,{'transition':anchor})['state']['musical_timing']['ending_needs_priority'])
 
@@ -83,7 +83,7 @@ class MusicalTimingTests(unittest.TestCase):
         self.assertTrue(request['state']['handoff_completion_required'])
         for key,choices in {'transport':{'mix'},'crossfader':{'B'},'bass':{'hold'},'mid':{'hold'},'high':{'hold'}}.items():
             self.assertEqual(set(request['questions'][key]['criteria']),choices)
-        self.assertEqual(set(request['questions']['duration']['criteria']),{'beats2','beats4'})
+        self.assertEqual(set(request['questions']['duration']['criteria']),{'beats8','beats16'})
         state['mixer']['cross']=1.
         request=policy.prepare(state,history)
         self.assertEqual(set(request['questions']['transport']['criteria']),{'reset_B'})
@@ -98,6 +98,31 @@ class MusicalTimingTests(unittest.TestCase):
             history={'transition':self.anchor(state)} if known else None
             request=policy.prepare(state,history)
             self.assertFalse(request['state']['handoff_completion_required'])
+
+    def test_recorded_second_handoff_keeps_smooth_sweep_and_rechecks_time(self):
+        # The recorded request 516 forced four beats with about 29 s left.
+        state=self.prepared(elapsed=175.5,remaining=29.2,both=True,cross=0.)
+        history={'transition':self.anchor(state)}
+        request=policy.prepare(state,history)
+        self.assertTrue(request['state']['handoff_completion_required'])
+        self.assertEqual(set(request['questions']['duration']['criteria']),{'beats8','beats16'})
+        decision=policy.resolve(request,response(request,transport='mix',crossfader='B',duration='beats16'))
+        self.assertTrue(policy.applicable(decision,state,history))
+        # A slow response cannot carry a long sweep across the cleanup boundary.
+        state['decks']['A']['remaining']=13
+        self.assertFalse(policy.applicable(decision,state,history))
+        urgent=policy.prepare(state,history)
+        self.assertEqual(set(urgent['questions']['duration']['criteria']),{'beats2','beats4'})
+
+    def test_completion_sweep_also_respects_incoming_clock_and_tempo(self):
+        for bpm,remaining,choices in ((124,16,{'beats8'}),(60,29,{'beats8'}),
+                                      (124,13,{'beats2','beats4'})):
+            state=self.prepared(remaining=29,both=True,cross=.5)
+            for deck in state['decks'].values():
+                deck['bpm']=bpm
+            state['decks']['B']['remaining']=remaining
+            request=policy.prepare(state,{'transition':self.anchor(state)})
+            self.assertEqual(set(request['questions']['duration']['criteria']),choices)
 
     def test_muted_start_does_not_start_overlap_timer_and_mix_timer_survives_holds(self):
         runner=Runner(None,None,None,[])
@@ -138,6 +163,37 @@ class MusicalTimingTests(unittest.TestCase):
             else:runner._invalidate_transition(changed)
             self.assertNotIn('audible_mix_started_ns',runner.transition,interruption)
             self.assertEqual(runner.transition['incoming'],'B')
+
+    def test_first_verified_center_frame_counts_before_the_rest_of_the_eq_bundle(self):
+        before=self.prepared(both=True,cross=0.)
+        before['captured_ns']-=16_000_000_000
+        first=deepcopy(before);first['mixer']['cross']=.5
+        first['captured_ns']+=4_000_000_000
+        after=deepcopy(first);after['captured_ns']+=12_000_000_000
+        runner=Runner(None,None,None,[]);runner.transition=self.anchor(before)
+        runner._remember_verified({'decision':{'transport':'mix'},'before_snapshot':before},
+                                  {'snapshot':after,'blend_confirmation':first})
+        self.assertEqual(runner.transition['audible_mix_started_ns'],first['captured_ns'])
+        timing=policy.prepare(after,{'transition':runner.transition})['state']['musical_timing']
+        self.assertEqual(timing['confirmed_audible_overlap_seconds'],12.)
+
+    def test_invalid_early_blend_evidence_cannot_backdate_overlap(self):
+        before=self.prepared(both=True,cross=0.)
+        after=deepcopy(before);after['mixer']['cross']=.5;after['captured_ns']+=16_000_000_000
+        for invalid in ('old','future','identity','alignment','closed','stopped','channel'):
+            with self.subTest(invalid=invalid):
+                first=deepcopy(after);first['captured_ns']-=12_000_000_000
+                if invalid=='old':first['captured_ns']=before['captured_ns']-1
+                elif invalid=='future':first['captured_ns']=after['captured_ns']+1
+                elif invalid=='identity':first['decks']['B']['track_id']='different'
+                elif invalid=='alignment':first['mixer']['aligned']=False
+                elif invalid=='closed':first['mixer']['cross']=0.
+                elif invalid=='stopped':first['decks']['B']['playing']=False
+                else:first['decks']['B']['channel']=0.
+                runner=Runner(None,None,None,[]);runner.transition=self.anchor(before)
+                runner._remember_verified({'decision':{'transport':'mix'},'before_snapshot':before},
+                                          {'snapshot':after,'blend_confirmation':first})
+                self.assertEqual(runner.transition['audible_mix_started_ns'],after['captured_ns'])
 
     def test_grid_group_is_based_on_original_downbeat_and_explicitly_estimated(self):
         track=library()[0]
@@ -252,9 +308,9 @@ class MusicalTimingTests(unittest.TestCase):
         anchor=self.anchor(state)
         anchor['audible_mix_started_ns']=state['captured_ns']-20_000_000_000
         timing=policy.prepare(state,{'transition':anchor})['state']['musical_timing']
-        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],8)
-        self.assertEqual(timing['suggested_remaining_overlap_seconds'],8)
-        self.assertFalse(timing['ending_needs_priority'])
+        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],0)
+        self.assertEqual(timing['suggested_remaining_overlap_seconds'],0)
+        self.assertTrue(timing['ending_needs_priority'])
         state['decks']['B']['remaining']=10
         timing=policy.prepare(state,{'transition':anchor})['state']['musical_timing']
         self.assertTrue(timing['ending_needs_priority'])
