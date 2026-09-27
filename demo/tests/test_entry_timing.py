@@ -16,6 +16,9 @@ def rows(pattern, width=8.):
 
 
 class EntryTimingTests(unittest.TestCase):
+    def setUp(self):
+        timing_fixtures.use_late_monotonic_clock(self)
+
     def state(self, elapsed=320, duration=420, start=360, end=408):
         state=timing_fixtures.MusicalTimingTests().prepared(elapsed=elapsed,remaining=duration-elapsed)
         structure=activity_sections(rows([1]*8+[0]*4+[1]*12+[0]*4+[1]*8))
