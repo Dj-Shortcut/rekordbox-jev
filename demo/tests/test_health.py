@@ -190,6 +190,27 @@ class RunnerHealthTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runner.stop(); await task
 
+    async def test_recovery_during_action_is_not_forgotten_when_action_finishes(self):
+        env = Environment(); env.health_generation = 0; env.gate = asyncio.Event()
+        events = []
+        runner = Runner(env, Policy(), Client(), events.append,
+                        tick_interval=.001, observe_interval=.002, decision_interval=.002)
+        task = asyncio.create_task(runner.run())
+        try:
+            await until(lambda: env.executions == 1)
+            env.health_generation = 1
+            await until(lambda: runner._needs_health_reconciliation)
+            self.assertTrue(runner.busy)
+            env.gate.set()
+            await until(lambda: env.executions >= 2)
+            recovered = next(e for e in events if e['event']=='execution_reconciled')
+            first = next(e for e in events if e['event']=='verified')
+            second = [e for e in events if e['event']=='dispatch'][1]
+            self.assertGreaterEqual(recovered['snapshot_seq'],first['snapshot_seq']+2)
+            self.assertGreaterEqual(second['snapshot_seq'],recovered['snapshot_seq'])
+        finally:
+            await runner.stop(); await task
+
     async def test_process_recovery_waits_for_two_new_readings_before_new_answer(self):
         class Recovering(Environment):
             health_generation = 0

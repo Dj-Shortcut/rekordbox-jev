@@ -295,6 +295,7 @@ class Rekordbox:
         state = snapshot
         dispatched = False
         control_attempted = False
+        action_generation = self.health_generation
 
         def reject_state(message, code='state_changed'):
             # Only explicit local guard failures qualify. A completed or failed
@@ -344,6 +345,8 @@ class Rekordbox:
             nonlocal state, dispatched, control_attempted
             if self.stopping:
                 raise asyncio.CancelledError()
+            if self.health_generation != action_generation:
+                reject_state('Verbinding of focus hersteld tijdens de actie; nieuwe Jev-keuze nodig.', 'health_changed')
             if name == 'action':
                 action_deck = {'deck1': 'A', 'deck2': 'B'}[params['action'].split('.')[0]]
                 params['expectedTrack'] = titles[action_deck]

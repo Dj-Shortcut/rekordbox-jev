@@ -48,6 +48,7 @@ class Runner:
         self._reconciliation_failures = 0
         self._mix_recovery_count = 0
         self._health_generation = getattr(env, 'health_generation', 0)
+        self._needs_health_reconciliation = False
         self._observation_failure_since = None
         self._last_valid_observation = None
         self._api_failures = RecoveryBudget(3, 'api_recovery')
@@ -207,6 +208,7 @@ class Runner:
 
     def _begin_health_reconciliation(self, before):
         """A repaired process/focus requires new stable reads and a new answer."""
+        self._needs_health_reconciliation = False
         self._epoch += 1
         self._retire_pending_request()
         self._last_actuation_end = self.clock()
@@ -219,6 +221,7 @@ class Runner:
 
     def _observation_unavailable(self):
         """Interrupt decision making while a screen is unavailable, with a deadline."""
+        self._needs_health_reconciliation = True
         if self._observation_failure_since is None:
             self._observation_failure_since = self.clock()
             self._epoch += 1
@@ -244,14 +247,22 @@ class Runner:
             generation = getattr(self.env, 'health_generation', 0)
             if generation != self._health_generation:
                 self._health_generation = generation
-                if not self.blocked and not self.busy and self._recovery is None and self._reconciliation is None:
-                    self._begin_health_reconciliation(previous)
+                self._needs_health_reconciliation = True
+                self._epoch += 1
+                self._retire_pending_request()
+                self._reset_reconciliation_streak()
+                if self._recovery is not None:
+                    self._recovery['positions'] = None
+                self._last_actuation_end = self.clock()
             if self.valid(snapshot):
                 self._last_valid_observation = self.clock()
-                if self._observation_failure_since is not None:
-                    if not self.blocked and not self.busy and self._recovery is None and self._reconciliation is None:
+                if self._needs_health_reconciliation and not self.blocked and not self.busy:
+                    if self._recovery is None and self._reconciliation is None:
                         self._begin_health_reconciliation(previous)
-                    self._observation_failure_since = None
+                    else:
+                        # Existing guarded recovery already requires fresh reads.
+                        self._needs_health_reconciliation = False
+                self._observation_failure_since = None
             else:
                 self._observation_unavailable()
             if self.valid(snapshot):
