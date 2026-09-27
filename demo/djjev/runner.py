@@ -43,6 +43,8 @@ class Runner:
         self._api_context = None
         self._actuator_context = None
         self._recovery = None
+        self._reconciliation = None
+        self._reconciliation_failures = 0
         self._mix_recovery_count = 0
 
     def request_stop(self):
@@ -175,6 +177,34 @@ class Runner:
             self._invalidate_transition(snapshot)
             self._latest_observation_start = started
             self.emit('snapshot', snapshot=self.latest, valid=self.valid(snapshot), seconds=self.clock()-started)
+            if self._reconciliation is not None and started >= self._last_actuation_end:
+                reconciliation = self._reconciliation
+                if self.valid(snapshot):
+                    identities = self._identities(snapshot)
+                    if identities is None:
+                        # Test doubles and degraded observations may not expose
+                        # decks; production observations always use identities.
+                        key = (snapshot.get('title'), snapshot.get('folder'))
+                    else:
+                        key = identities
+                    if key == reconciliation['last_key']:
+                        reconciliation['stable'] += 1
+                    else:
+                        reconciliation['last_key'] = deepcopy(key)
+                        reconciliation['stable'] = 1
+                    reconciliation['reads'] += 1
+                    if reconciliation['stable'] >= 2:
+                        self._reconciliation = None
+                        self.emit('execution_reconciled', request_id=reconciliation['request_id'],
+                                  message='Toestand opnieuw bevestigd; Jev kiest vanaf deze stand.',
+                                  partial=True, verified=False, reads=reconciliation['reads'])
+                    elif reconciliation['reads'] >= 8:
+                        self._reconciliation = None
+                        self.blocked = True
+                        self.emit('error', stage='recovery', reason='state_not_stable',
+                                  message='Toestand bleef na bediening onduidelijk; bediening onderbroken.')
+                else:
+                    reconciliation['reads'] += 1
             if self._recovery is not None and started >= self._last_actuation_end:
                 recovery = self._recovery
                 positions = mixer_state(snapshot, recovery['titles'])
@@ -205,6 +235,28 @@ class Runner:
             self.latest = None
             self.emit('error', stage='observe', error_type=type(error).__name__, message=str(error))
 
+    def _begin_reconciliation(self, context, *, message, error_type=None):
+        """Re-read after an uncertain action; never replay that action.
+
+        A native command may have reached Rekordbox even when its readback or
+        reply was lost.  The only safe recovery is to establish a fresh,
+        stable state and ask Jev again.  Replaying the old relative gesture is
+        explicitly forbidden.  A bounded failure still ends in blocked state.
+        """
+        self._reconciliation_failures += 1
+        if self._reconciliation_failures >= 3:
+            self.blocked = True
+            self.emit('error', stage='recovery', reason='repeated_execution_failure',
+                      request_id=context['request_id'], error_type=error_type,
+                      message='Meerdere bedieningen konden niet worden bevestigd; bediening onderbroken.')
+            return
+        self._reconciliation = {'request_id': context['request_id'],
+                                'last_key': None, 'stable': 0, 'reads': 0,
+                                'deadline': self.clock()+8}
+        self.emit('execution_reconciling', request_id=context['request_id'],
+                  message=message, error_type=error_type,
+                  partial=True, verified=False)
+
     def _actuator_done(self):
         task, self._actuator_task = self._actuator_task, None
         context, self._actuator_context = self._actuator_context, None
@@ -214,12 +266,13 @@ class Runner:
         try:
             result = task.result()
             if not isinstance(result, dict) or result.get('verified') is not True:
-                self.blocked = True
-                self.emit('error', stage='execute', reason='execution_unconfirmed',
-                          request_id=context['request_id'], decision=context['decision'], result=result)
+                self._begin_reconciliation(
+                    context, message='Bediening niet bevestigd; Rekordbox opnieuw uitlezen.',
+                    error_type='execution_unconfirmed')
                 return
             self.history.append({'decision': context['decision'], 'verified': True, 'time': self.clock()})
             self._remember_verified(context,result)
+            self._reconciliation_failures = 0
             self.verified_decisions += 1
             self.verified_actions += result.get('dispatched') is True
             if context['decision'].get('transport') == 'mix' and result.get('dispatched') is True:
@@ -255,10 +308,18 @@ class Runner:
                           decision=context['decision'], commands_sent=False,
                           dispatched=False, retryable=True)
                 return
-            self.blocked = True
-            self.emit('error', stage='execute', reason='execution_unconfirmed',
-                      request_id=context['request_id'], error_type=type(error).__name__,
-                      message=str(error), decision=context['decision'])
+            if type(error) is MixReadbackIncomplete:
+                # A mix gesture with partial/contradictory readback has a
+                # dedicated bounded recovery path above. If it did not meet
+                # that path's strict identity and mixer guards, do not let the
+                # generic state reconciliation authorize another gesture.
+                self.blocked = True
+                self.emit('error', stage='execute', reason='execution_unconfirmed',
+                          request_id=context['request_id'], error_type=type(error).__name__,
+                          message=str(error), decision=context['decision'])
+                return
+            self._begin_reconciliation(context, message=str(error),
+                                       error_type=type(error).__name__)
 
     def _api_done(self):
         task, self._api_task = self._api_task, None
@@ -267,7 +328,9 @@ class Runner:
             response = task.result()
             self.emit('answer', request_id=context['id'], request=context['request'], response=response,
                       seconds=self.clock()-context['started'])
-            if self.stopping or self.blocked or self._recovery is not None or self.busy or context['busy'] or context['epoch'] != self._epoch:
+            if (self.stopping or self.blocked or self._recovery is not None
+                    or self._reconciliation is not None or self.busy
+                    or context['busy'] or context['epoch'] != self._epoch):
                 self.emit('ignored', request_id=context['id'], reason='busy_stopped_or_changed_execution')
                 return
             if not self.valid(self.latest) or self._latest_observation_start < self._last_actuation_end:
@@ -307,11 +370,17 @@ class Runner:
                     self.blocked = True
                     self.emit('error', stage='recovery', reason='mixer_readback_timeout',
                               message='Mixer niet tijdig opnieuw leesbaar; bediening onderbroken.')
+                if self._reconciliation is not None and now >= self._reconciliation['deadline']:
+                    self._reconciliation = None
+                    self.blocked = True
+                    self.emit('error', stage='recovery', reason='state_reconciliation_timeout',
+                              message='Rekordbox-toestand niet tijdig opnieuw bevestigd; bediening onderbroken.')
                 if self._observe_task is None and now-self._last_observe_start >= self.observe_interval:
                     self._last_observe_start = now
                     self._observe_task = asyncio.create_task(self._observe())
                 fresh_after_action = self.busy or self._latest_observation_start >= self._last_actuation_end
-                if (not self.blocked and self._recovery is None and self._api_task is None and self.valid(self.latest)
+                if (not self.blocked and self._recovery is None and self._reconciliation is None
+                        and self._api_task is None and self.valid(self.latest)
                         and fresh_after_action and self.sequence != self._last_request_snapshot
                         and now-self._last_request_start >= self.decision_interval):
                     try:
