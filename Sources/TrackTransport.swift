@@ -176,7 +176,7 @@ private func requireReplaceableDeck(_ observation: Observation, _ deck: Int, exp
         throw BridgeError("Andere decktitel gewijzigd tijdens stille vervanging; niets geladen.")
     }
     let vision = MixerVision(bitmap:NSBitmapImageRep(cgImage:observation.image))
-    let assignments = observation.mixerJSON["deck_assignments"] as? [String:String]
+    let assignments = observation.deckAssignments
     guard replacementLoadAllowed(deck:deck,targetPlaying:observation.playing(deck:deck),
         otherPlaying:observation.playing(deck:3-deck),targetFader:observation.fader(deck:deck),
         otherFader:observation.fader(deck:3-deck),crossfader:vision.crossfader,
@@ -361,6 +361,12 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
                 let confirmed = withConfirmedBrowserTokens(fresh,recognized:browser,
                     regions:[loadBrowserHeadingRegion],currentRowTokens:currentTokens)
                 try requireLoadObservation(confirmed)
+                // Row OCR and replacement checks consume time after capture.
+                // Recapture here, before hover/click, if they used the input reserve.
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard observationHasInputBudget(sampledAt:confirmed.sampledAt,now:now,reserveNS:150_000_000) else {
+                    throw LoadObservationStale(ageMS:Double(now-confirmed.sampledAt)/1e6)
+                }
                 return confirmed
             }
             if attempt == 1 {
@@ -570,7 +576,7 @@ func setDesiredPlayback(_ request: [String:Any]) async throws -> [String:Any] {
         guard desired else { throw BridgeError("Een openingsstart vereist playing=true.") }
         try requireEmptyStoppedDeck(before,3-deck)
         let vision = MixerVision(bitmap:NSBitmapImageRep(cgImage:before.image))
-        let assignments = before.mixerJSON["deck_assignments"] as? [String:String]
+        let assignments = before.deckAssignments
         guard let channel = before.fader(deck:deck), channel >= 0.9,
               assignments == ["1":"left","2":"right"],
               let cross = vision.crossfader,
