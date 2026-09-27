@@ -326,6 +326,7 @@ let observationBPMCrops = [CGRect(x:484,y:298,width:57,height:20),CGRect(x:743,y
 let observationBPMCache = ObservationTextCache(regions:observationBPMCrops)
 let observationMetadataCrops = [CGRect(x:45,y:193,width:435,height:20),CGRect(x:731,y:193,width:435,height:20)]
 let observationBrowserCrop = CGRect(x:0,y:400,width:1272,height:355)
+let observationFolderCache = ObservationTextCache(regions:[loadBrowserHeadingRegion])
 
 func recognizeTextRegion(_ image: CGImage, _ area: CGRect) throws -> [TextToken] {
     guard let input = image.cropping(to:area) else { throw BridgeError("OCR-uitsnede is ongeldig.") }
@@ -354,6 +355,15 @@ func recognizeObservationTokens(_ image: CGImage, mixerOnly: Bool) throws -> [Te
     var tokens = mixerOnly && knownSize ? [] : try recognize(knownSize ? observationBrowserCrop :
         CGRect(x:0,y:0,width:image.width,height:image.height))
     if knownSize {
+        // Recovery also checks folder identity. Fast reads must carry freshly
+        // validated folder pixels, not an absent heading or a stale full read.
+        tokens.removeAll { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
+        if let folder = observationFolderCache.tokens(for:image) { tokens += folder }
+        else {
+            let folder = try recognize(loadBrowserHeadingRegion)
+            observationFolderCache.store(folder,image:image)
+            tokens += folder
+        }
         tokens.removeAll { observationHeaderRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
         if let header = observationHeaderCache.tokens(for:image) { tokens += header }
         else {

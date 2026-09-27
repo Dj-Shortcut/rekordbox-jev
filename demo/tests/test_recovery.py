@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from djjev.recovery import MixReadbackIncomplete, mixer_state, reconcileable_mix
+from djjev.recovery import MixReadbackIncomplete, mixer_state, reconcileable_mix, control_state, same_control_state
 from djjev.environment import Rekordbox
 from djjev.runner import Runner
 from test_environment import both, low, Native, decision
@@ -30,6 +30,21 @@ class PartialNative(Native):
         return await super().call(role,name,**params)
 
 class RecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_empty_deck_recovery_does_not_require_nonexistent_beat_alignment(self):
+        state = snapshot()
+        state['folder'] = '26'
+        state['mixer']['aligned'] = None
+        state['decks']['B'].update(title='Not Loaded.',track_id=None,playing=False,bpm=None)
+        key = control_state(state)
+        self.assertIsNotNone(key)
+        self.assertTrue(same_control_state(key,control_state(deepcopy(state))))
+        self.assertIsNone(mixer_state(state,{'A':state['decks']['A']['title'],'B':'Not Loaded.'}))
+        state['folder'] = ''
+        self.assertIsNone(control_state(state))
+        state['folder'] = '26'
+        state['decks']['A']['playing'] = state['decks']['B']['playing'] = True
+        self.assertIsNone(control_state(state))
+
     async def test_partial_mix_exits_bundle_without_more_controls(self):
         frame=both();low(frame,2,-.3)
         native=PartialNative(frame);env=Rekordbox(native,library())

@@ -62,10 +62,15 @@ def control_state(snapshot):
         return None
     decks = snapshot.get('decks', {})
     mixer = snapshot.get('mixer', {})
-    if (set(decks) != {'A', 'B'} or not number(mixer.get('cross'), 0, 1)
-            or type(mixer.get('aligned')) is not bool):
+    if set(decks) != {'A', 'B'} or not number(mixer.get('cross'), 0, 1):
         return None
-    exact = [snapshot.get('folder'), mixer.get('assignments'), mixer['aligned']]
+    aligned = mixer.get('aligned')
+    # There is no beat-pair alignment to read with a confirmed stopped/empty
+    # deck. This reconciles controls only; mixer_state still demands alignment.
+    if (type(aligned) is not bool and not (aligned is None and
+            any(deck.get('playing') is False for deck in decks.values()))):
+        return None
+    exact = [snapshot.get('folder'), mixer.get('assignments'), aligned]
     positions = [mixer['cross']]
     tempos = []
     for name in ('A', 'B'):

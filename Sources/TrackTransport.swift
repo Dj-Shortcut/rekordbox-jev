@@ -72,26 +72,51 @@ private func requireFreshTransport(_ observation: Observation, recoverablePreDis
 
 let loadBrowserHeadingRegion = CGRect(x:235,y:429,width:450,height:24)
 let loadBrowserRowsRegion = CGRect(x:540,y:460,width:351,height:279)
+let loadBrowserColumnsRegion = CGRect(x:235,y:451,width:1018,height:22)
+
+func browserTitleColumn(_ tokens: [TextToken]) -> CGRect? {
+    let headers = tokens.filter { $0.confidence > 0.8 &&
+        loadBrowserColumnsRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
+    let titles = headers.filter { ["titel van muziekstuk","track title","title"].contains(trackIdentityText($0.text)) }
+    guard titles.count == 1, let title = titles.first,
+          let next = headers.filter({$0.rect.minX > title.rect.maxX && abs($0.rect.midY-title.rect.midY) < 5})
+            .min(by:{$0.rect.minX < $1.rect.minX}) else { return nil }
+    let left = floor(title.rect.minX)-6, right = floor(next.rect.minX)-6
+    let top = ceil(title.rect.maxY)+2
+    guard left >= 235, right-left >= 90, right <= 1253, top < 490 else { return nil }
+    return CGRect(x:left,y:top,width:right-left,height:739-top)
+}
+
+func browserTitleTokens(_ tokens: [TextToken]) -> [TextToken] {
+    guard let column = browserTitleColumn(tokens) else { return [] }
+    return tokens.filter { $0.confidence > 0.8 && $0.rect.minY > column.minY &&
+        $0.rect.maxY < column.maxY && $0.rect.minX >= column.minX && $0.rect.maxX < column.maxX }
+        .sorted { $0.rect.minY < $1.rect.minY }
+}
 
 func loadBrowserPixelsUnchanged(_ recognized: CGImage, _ fresh: CGImage, requireRows: Bool) -> Bool {
     observationRegionsUnchanged(recognized,fresh,regions:requireRows
         ? [loadBrowserHeadingRegion,loadBrowserRowsRegion] : [loadBrowserHeadingRegion])
 }
 
-func loadBrowserRowRegion(_ row: CGRect) -> CGRect {
+func loadBrowserRowRegion(_ row: CGRect, column: CGRect? = nil) -> CGRect {
+    if let column {
+        return CGRect(x:column.minX+2,y:max(column.minY,floor(row.midY)-8),
+                      width:column.width-4,height:17).intersection(column)
+    }
     // Actual title-cell body, excluding the rating column and cell separator.
     // The saved blinking-caret pair recognizes Vaal in both phases here.
-    CGRect(x:550,y:max(460,floor(row.midY)-8),width:333,height:17)
+    return CGRect(x:550,y:max(460,floor(row.midY)-8),width:333,height:17)
         .intersection(loadBrowserRowsRegion)
 }
 
-func browserRowSelected(_ image: CGImage, row: CGRect) -> Bool {
+func browserRowSelected(_ image: CGImage, row: CGRect, column: CGRect? = nil) -> Bool {
     guard image.width == 1272 && image.height == 768 else { return false }
-    let region = loadBrowserRowRegion(row)
+    let region = loadBrowserRowRegion(row,column:column)
     guard region.height >= 10 else { return false }
     let bitmap = NSBitmapImageRep(cgImage:image)
     var blue = 0, total = 0
-    for y in Int(region.minY)..<Int(region.maxY) { for x in 550..<880 {
+    for y in Int(region.minY)..<Int(region.maxY) { for x in Int(region.minX)..<Int(region.maxX) {
         total += 1
         guard let c = bitmap.colorAt(x:x,y:y)?.usingColorSpace(.deviceRGB) else { continue }
         if c.blueComponent > 0.2 && c.blueComponent > c.greenComponent*1.3 && c.blueComponent > c.redComponent*1.7 { blue += 1 }
@@ -115,7 +140,10 @@ private func withConfirmedBrowserTokens(_ fresh: Observation, recognized: Observ
     let browserTokens = recognized.tokens.filter { token in
         regions.contains { $0.contains(CGPoint(x:token.rect.midX,y:token.rect.midY)) }
     }
-    return Observation(image:fresh.image,tokens:fresh.tokens+browserTokens+currentRowTokens,window:fresh.window,
+    let freshTokens = fresh.tokens.filter { token in
+        !regions.contains { $0.contains(CGPoint(x:token.rect.midX,y:token.rect.midY)) }
+    }
+    return Observation(image:fresh.image,tokens:freshTokens+browserTokens+currentRowTokens,window:fresh.window,
         sampledAt:fresh.sampledAt,elapsedMS:fresh.elapsedMS,captureMS:fresh.captureMS,ocrMS:fresh.ocrMS,
         identityReused:fresh.identityReused,titleOCRReused:fresh.titleOCRReused,bpmOCRReused:fresh.bpmOCRReused,
         validationAttempts:fresh.validationAttempts,validationMS:fresh.validationMS)
@@ -187,10 +215,7 @@ private func requireReplaceableDeck(_ observation: Observation, _ deck: Int, exp
 }
 
 private func browserTitleRows(_ observation: Observation) -> [TextToken] {
-    observation.tokens.filter {
-        $0.rect.minY > 460 && $0.rect.maxY < 739 &&
-        $0.rect.minX >= 540 && $0.rect.maxX < 891 && $0.confidence > 0.8
-    }.sorted { $0.rect.minY < $1.rect.minY }
+    browserTitleTokens(observation.tokens)
 }
 
 struct BrowserScanProgress {
@@ -337,9 +362,12 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
         for attempt in 1...5 {
             try requireLiveRequest()
             let fresh = try await checkedObservation(recoverablePreDispatch:!inputSent,mixerOnly:true)
+            guard let column = browserTitleColumn(browser.tokens) else {
+                throw BridgeError("Titelkolom niet eenduidig leesbaar; geen laadbediening verstuurd.")
+            }
             let row = title.flatMap { uniqueChosenRow(browser,title:$0,identity:identity) }
-            let rowRegion = row.map { loadBrowserRowRegion($0.rect) }
-            let headingSame = observationRegionsUnchanged(browser.image,fresh.image,regions:[loadBrowserHeadingRegion])
+            let rowRegion = row.map { loadBrowserRowRegion($0.rect,column:column) }
+            let headingSame = observationRegionsUnchanged(browser.image,fresh.image,regions:[loadBrowserHeadingRegion,loadBrowserColumnsRegion])
             let rowPixelsSame = rowRegion.map { observationRegionsUnchanged(browser.image,fresh.image,regions:[$0]) } ?? (title == nil)
             // Re-recognize the intended row in the *fresh* frame. Caret blinking
             // may alter pixels without altering title identity; neither old row
@@ -349,7 +377,7 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
             else { currentTokens = try rowRegion.map { try recognizeTextRegion(fresh.image,$0) } ?? [] }
             let currentRow = title.flatMap { uniqueChosenBrowserToken(currentTokens,title:$0,identity:identity) }
             let rowConfirmed = title == nil || currentRow != nil
-            let selectionConfirmed = !selected || currentRow.map { browserRowSelected(fresh.image,row:$0.rect) } == true
+            let selectionConfirmed = !selected || currentRow.map { browserRowSelected(fresh.image,row:$0.rect,column:column) } == true
             guardTrace.append(["phase":phase,"attempt":attempt,"recognizedSampledAtNS":browser.sampledAt,
                 "freshSampledAtNS":fresh.sampledAt,"headingUnchanged":headingSame,"titleRowPixelsUnchanged":rowPixelsSame,
                 "titleRowConfirmed":rowConfirmed,"currentRowOCR":currentTokens.map(\.text),
@@ -359,7 +387,7 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
                 "rowY":row.map { $0.rect.midY } as Any? ?? NSNull(),"inputAlreadySent":inputSent])
             if headingSame && rowConfirmed && selectionConfirmed {
                 let confirmed = withConfirmedBrowserTokens(fresh,recognized:browser,
-                    regions:[loadBrowserHeadingRegion],currentRowTokens:currentTokens)
+                    regions:[loadBrowserHeadingRegion,loadBrowserColumnsRegion],currentRowTokens:currentTokens)
                 try requireLoadObservation(confirmed)
                 // Row OCR and replacement checks consume time after capture.
                 // Recapture here, before hover/click, if they used the input reserve.
@@ -435,6 +463,10 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
     defer { if !finished { publishProgress("failed") } }
     var before = try await observe()
     try requireFolder26(before)
+    guard browserTitleColumn(before.tokens) != nil else {
+        throw PreDispatchRejection(code:"browser_columns_unknown",
+            description:"Titelkolom niet eenduidig leesbaar; geen laadbediening verstuurd.",retryable:false)
+    }
     _ = progress.observe(titles:browserTitleRows(before).map(\.text))
     publishProgress("searching")
     // The actual folder-26 view has no search field. Try the visible rows first,
@@ -487,7 +519,7 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
     guard let chosen = uniqueChosenRow(selectionGuard,title:expected,identity:identity) else {
         throw BridgeError("Gekozen titel is niet uniek in het verse selectievenster; niets geselecteerd.")
     }
-    let alreadySelected = browserRowSelected(selectionGuard.image,row:chosen.rect)
+    let alreadySelected = browserRowSelected(selectionGuard.image,row:chosen.rect,column:browserTitleColumn(selectionGuard.tokens))
     try await establishBrowserSelection(alreadySelected:alreadySelected,selectOnce:{
         try await pointer(CGPoint(x:chosen.rect.midX,y:chosen.rect.midY),observation:selectionGuard,
                           preDispatch:{try immediateInputGuard(selectionGuard)})
