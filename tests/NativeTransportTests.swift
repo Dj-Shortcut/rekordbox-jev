@@ -43,11 +43,15 @@ import Darwin
                 return (full,try recognizeObservationTokens(image,mixerOnly:true))
             }.value
             let titles = browserTitleTokens(full).map(\.text)
+            print("Observed fixture title column: \(String(describing:browserTitleColumn(full))); titles: \(titles)")
+            fflush(stdout)
             check(titles.contains("Bright Lights Fading (Death in vegas Remix)") && !titles.contains("Slam"),
                   "Actual failing browser screenshot resolves titles instead of artists")
             func folder(_ tokens:[TextToken]) -> [String] {
                 tokens.filter{loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY))}.map(\.text)
             }
+            print("Observed fixture folders: full=\(folder(full)), fast=\(folder(fast))")
+            fflush(stdout)
             check(folder(full) == ["26"] && folder(fast) == ["26"],"Full and fast captures retain the same proven folder identity")
             print("PASS actual browser-column and fast-folder screenshot regression")
         }

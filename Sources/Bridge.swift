@@ -357,10 +357,15 @@ func recognizeObservationTokens(_ image: CGImage, mixerOnly: Bool) throws -> [Te
     if knownSize {
         // Recovery also checks folder identity. Fast reads must carry freshly
         // validated folder pixels, not an absent heading or a stale full read.
+        let observedFolder = tokens.filter { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
         tokens.removeAll { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
         if let folder = observationFolderCache.tokens(for:image) { tokens += folder }
         else {
-            let folder = try recognize(loadBrowserHeadingRegion)
+            // Vision misses the bare two-digit heading in a tiny isolated crop.
+            // Use the proven browser context on a cache miss, then reuse only
+            // after exact heading-pixel comparison against every fresh frame.
+            let folder = (mixerOnly ? try recognize(observationBrowserCrop) : observedFolder)
+                .filter { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
             observationFolderCache.store(folder,image:image)
             tokens += folder
         }
