@@ -38,6 +38,24 @@ class WidgetEvidenceTests(unittest.TestCase):
                 self.assertEqual(read(1)['execution']['message'], '[verborgen]')
                 self.assertNotIn('private-fixture-key', (root/'widget/jev-events'/f'{display.run_id}-1.json').read_text())
 
+    def test_pending_cancellation_and_terminal_reason_stay_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(main, 'ROOT', root), patch.object(main, 'DISPLAY', root/'widget'):
+                display = main.Display('fixture-key')
+                display({'event':'request','request_id':1,'request':policy.prepare(snapshot())})
+                display({'event':'ignored','request_id':1,'reason':'recovery_requires_fresh_request'})
+                record = json.loads((root/'widget/jev-events'/f'{display.run_id}-1.json').read_text())
+                self.assertEqual(record['status'],'cancelled')
+                display({'event':'error','reason':'tracks_changed','message':'Exacte stopreden','blocked':True})
+                display({'event':'error','reason':'observe_failed','message':'Latere leesfout','blocked':True})
+                display({'event':'stopped'})
+                status = json.loads((root/'widget/dj-session-status.json').read_text())
+                self.assertEqual(status['status'],'blocked')
+                self.assertIn('Exacte stopreden',status['message'])
+                checkpoint = json.loads((display.directory/'session.json').read_text())
+                self.assertEqual(checkpoint['last_error']['reason'],'tracks_changed')
+
 
 if __name__ == '__main__':
     unittest.main()

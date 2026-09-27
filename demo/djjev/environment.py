@@ -4,6 +4,7 @@ A dedicated observer keeps reading while a bounded control operation executes.
 The already signed native app supplies screen/keyboard/mouse primitives only.
 """
 import asyncio
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from .events import emit, native_parameters, native_result_summary, snapshot_sum
 from .audio_timeline import TimelineStore
 from .eq import BASS_TARGETS, TONE_TARGETS, position, readable
 from .recovery import MixReadbackIncomplete, reconcileable_mix, mixer_state
+from .health import HealthBlocked, NativeConnectionError, RecoveryBudget
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT.parent if (ROOT.parent/'Sources/Bridge.swift').is_file() else ROOT.parent/'rekordbox-bridge'
@@ -60,64 +62,183 @@ def native_result(reply):
 
 
 class Native:
-    def __init__(self):
+    """Own Bridge roles; recover only after the role lock proves no worker remains."""
+    def __init__(self, *, sockets=SOCKETS, bridge=BRIDGE, trace=None, clock=time.monotonic):
         self.children = []
-        self.cancel = SOCKETS / f'stop-{os.getpid()}'
-        self.cancel.unlink(missing_ok=True)
+        self.sockets, self.bridge, self.trace, self.clock = sockets, bridge, trace, clock
+        self.cancel = sockets / f'stop-{os.getpid()}'
+        # A host Stop may arrive before Python has installed its signal handlers.
+        # Never erase that fence during startup.
+        self.stopping = self.cancel.exists()
+        self.control_inhibited = False
+        self.generation = 0
+        self.statuses = {}
+        self.expected_build = None
+        self.restarts = RecoveryBudget(3, 'bridge_restarts')
+        self.focus = RecoveryBudget(2, 'focus_recovery')
+        self._last_health = float('-inf')
+        self._last_focus = float('-inf')
+        self._role_locks = {role: asyncio.Lock() for role in ('observer', 'control')}
+        self._health_lock = asyncio.Lock()
 
     async def call(self, role, command, **parameters):
-        reader, writer = await asyncio.open_unix_connection(str(SOCKETS / f'demo-{role}.sock'), limit=4_000_000)
+        """Send once; a failed or cancelled reply never retries the command."""
+        if (self.stopping or role == 'control' and self.control_inhibited) and command not in ('status', 'quit'):
+            raise HealthBlocked('stopped', 'Stop gevraagd; geen verdere bediening.')
+        async with self._role_locks[role]:
+            writer = None
+            sent = False
+            timeout = (90 if command == 'refreshLibrary' else 60 if command == 'loadChosenTrack'
+                       else 8 if command == 'observe' else 2 if command == 'status' else 25)
+            try:
+                async with asyncio.timeout(timeout):
+                    reader, writer = await asyncio.open_unix_connection(
+                        str(self.sockets / f'demo-{role}.sock'), limit=4_000_000)
+                    if (self.stopping or role == 'control' and self.control_inhibited) and command not in ('status', 'quit'):
+                        raise HealthBlocked('stopped', 'Stop gevraagd; geen verdere bediening.')
+                    payload = json.dumps({'command': command, 'clientPID': os.getpid(), **parameters},
+                                         allow_nan=False).encode()+b'\n'
+                    # Conservatively mark input possible before writing any bytes.
+                    sent = True
+                    writer.write(payload)
+                    await writer.drain()
+                    line = await reader.readline()
+                    if not line.endswith(b'\n'):
+                        raise ValueError('incomplete native reply')
+                    reply = json.loads(line)
+                    if not isinstance(reply, dict):
+                        raise ValueError('invalid native reply')
+                    return native_result(reply)
+            except (OSError, ValueError, KeyError, TimeoutError) as error:
+                self._last_health = float('-inf')
+                raise NativeConnectionError(role, command, sent, error) from error
+            finally:
+                if writer is not None:
+                    writer.close()
+                    try:
+                        await asyncio.wait_for(writer.wait_closed(), .2)
+                    except (OSError, TimeoutError):
+                        pass
+
+    def role_free(self, role):
+        """The native lifetime flock, not a lost socket, proves a worker has exited."""
+        self.sockets.mkdir(parents=True, exist_ok=True)
+        with (self.sockets / f'demo-{role}.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return True
+
+    def validate_status(self, role, status):
+        if (not isinstance(status, dict) or status.get('demoRole') != role
+                or type(status.get('protocolVersion')) is not int or status['protocolVersion'] != 3
+                or type(status.get('bridgePID')) is not int):
+            raise HealthBlocked('bridge_protocol_mismatch', 'Bridge-rol of protocol klopt niet; bouw de apps opnieuw.')
+        if self.expected_build and status.get('sourceDigest') != self.expected_build['source_digest']:
+            raise HealthBlocked('bridge_build_mismatch', 'De draaiende Bridge hoort bij een andere build; sluit de oude apps eerst.')
+        self.statuses[role] = status
+        emit(self.trace, 'bridge_status', role=role, status=status,
+             restarts=self.restarts.used, focus_attempts=self.focus.used)
+        return status
+
+    async def ensure_role(self, role, *, initial=False):
         try:
-            writer.write(json.dumps({'command': command, 'clientPID': os.getpid(), **parameters}, allow_nan=False).encode()+b'\n')
-            await writer.drain()
-            line = await asyncio.wait_for(reader.readline(), 90 if command == 'refreshLibrary' else 60 if command == 'loadChosenTrack' else 25)
-            reply = json.loads(line)
-            return native_result(reply)
-        finally:
-            writer.close()
-            await writer.wait_closed()
+            return self.validate_status(role, await self.call(role, 'status'))
+        except NativeConnectionError:
+            pass
+        if self.stopping:
+            raise HealthBlocked('stopped', 'Stop gevraagd; herstel afgebroken.')
+        if not self.role_free(role):
+            raise HealthBlocked('bridge_worker_unresponsive',
+                                f'{role} antwoordt niet maar bestaat nog; geen tweede uitvoerder gestart.')
+        attempt = 0 if initial else self.restarts.consume()
+        emit(self.trace, 'health', phase='restarting', role=role, attempt=attempt)
+        executable = self.bridge / 'Rekordbox Bridge.app/Contents/MacOS/rekordbox-bridge'
+        environment = {k:v for k,v in os.environ.items() if 'TYPESAFE' not in k.upper() and not k.upper().endswith('API_KEY')}
+        child = await asyncio.create_subprocess_exec(str(executable), f'--demo-{role}', cwd=self.bridge,
+            env=environment, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        self.children.append((role, child))
+        deadline = self.clock()+8
+        while not self.stopping and self.clock() < deadline:
+            try:
+                status = self.validate_status(role, await self.call(role, 'status'))
+                if not initial:
+                    self.generation += 1
+                return status
+            except NativeConnectionError:
+                if child.returncode is not None:
+                    raise HealthBlocked('bridge_start_failed', f'{role} kon niet starten.')
+                await asyncio.sleep(.1)
+        raise HealthBlocked('bridge_start_timeout', f'{role} werd niet tijdig bereikbaar.')
+
+    async def health(self):
+        """Check between inputs; never queue health/focus behind a physical action."""
+        if self.stopping or self.control_inhibited or self._role_locks['control'].locked():
+            return
+        if self.clock()-self._last_health < 2:
+            return
+        async with self._health_lock:
+            if self.stopping or self.control_inhibited or self._role_locks['control'].locked():
+                return
+            self._last_health = self.clock()
+            for role in ('observer', 'control'):
+                await self.ensure_role(role)
+            status = self.statuses['observer']
+            if status.get('rekordboxRunning') is not True:
+                raise HealthBlocked('rekordbox_exited', 'Rekordbox is afgesloten; bediening onderbroken.')
+            if status.get('accessibility') is not True or status.get('screenRecording') is not True:
+                raise HealthBlocked('permission_missing', 'Scherm- of bedieningstoestemming ontbreekt.')
+            if status.get('rekordboxFrontmost') is not True:
+                # Only an active runner calls health. Two attempts per session,
+                # spaced apart; status polling outside a set never steals focus.
+                if self.clock()-self._last_focus < 5:
+                    return
+                attempt = self.focus.consume()
+                self._last_focus = self.clock()
+                emit(self.trace, 'health', phase='focus_recovery', attempt=attempt)
+                await self.call('control', 'activate')
+                self.generation += 1
+                # Do not count an activate acknowledgement as a valid screen.
 
     async def start(self):
-        executable = BRIDGE / 'Rekordbox Bridge.app/Contents/MacOS/rekordbox-bridge'
-        environment = {k:v for k,v in os.environ.items() if 'TYPESAFE' not in k.upper() and not k.upper().endswith('API_KEY')}
+        manifest = self.bridge/'build-info.json'
+        if manifest.is_file():
+            self.expected_build = json.loads(manifest.read_text())
         for role in ('observer', 'control'):
-            try:
-                if (await self.call(role, 'status')).get('demoRole') == role:
-                    continue
-            except (OSError, ValueError, RuntimeError):
-                pass
-            child = await asyncio.create_subprocess_exec(str(executable), f'--demo-{role}', cwd=BRIDGE,
-                env=environment, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
-            self.children.append((role,child))
-            until = time.monotonic()+8
-            while time.monotonic() < until:
-                try:
-                    if (await self.call(role,'status')).get('demoRole') == role:
-                        break
-                except (OSError, ValueError, RuntimeError):
-                    pass
-                if child.returncode is not None:
-                    raise RuntimeError('De lokale '+role+' kon niet starten.')
-                await asyncio.sleep(.1)
-            else:
-                raise RuntimeError('De lokale '+role+' is niet bereikbaar.')
-        await self.call('control','activate')
+            await self.ensure_role(role, initial=True)
+        await self.call('control', 'activate')
+
+    def inhibit(self):
+        """Fence all further input for this session while read-only observation remains."""
+        if self.control_inhibited:
+            return
+        self.control_inhibited = True
+        self.sockets.mkdir(parents=True, exist_ok=True)
+        self.cancel.touch(mode=0o600, exist_ok=True)
 
     async def close(self):
-        SOCKETS.mkdir(parents=True, exist_ok=True)
+        """Fence the session PID before waiting for workers; never pause playback."""
+        if self.stopping:
+            return
+        self.stopping = True
+        self.sockets.mkdir(parents=True, exist_ok=True)
         self.cancel.touch(mode=0o600, exist_ok=True)
         for role, child in self.children:
+            if child.returncode is not None:
+                continue
             try:
-                await asyncio.wait_for(self.call(role,'quit'),2)
-            except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
+                await asyncio.wait_for(self.call(role, 'quit'), 2)
+            except (OSError, ValueError, RuntimeError, TimeoutError):
                 pass
         # No SIGKILL: cancellation is checked before the next native input.
 
 
 class Rekordbox:
     def __init__(self, native=None, library=None, native_trace=None, audio_store=None, *, effects_enabled=False):
-        self.native = native or Native()
+        self.native = native or Native(trace=native_trace)
         self.library = library if library is not None else read_library()
         # Cache validation/preload happens before Runner starts. Snapshot lookup
         # is bounded in-memory work, with no Essentia import or file access.
@@ -150,8 +271,18 @@ class Rekordbox:
                 if self.last_effect_ns else 0.)
         return snapshot
 
+    @property
+    def health_generation(self):
+        return getattr(self.native, 'generation', 0)
+
     async def observe(self):
+        if hasattr(self.native, 'health'):
+            await self.native.health()
         return self.snapshot(await self.native.call('observer', 'observe', fast=True))
+
+    def inhibit(self):
+        if hasattr(self.native, 'inhibit'):
+            self.native.inhibit()
 
     async def stop(self):
         self.stopping = True
@@ -222,6 +353,8 @@ class Rekordbox:
                      'expected_titles': dict(titles), 'parameters': native_parameters(params)}
             emit(self.native_trace, 'native_command', phase='started',
                  before=snapshot_summary(state), **trace)
+            if getattr(self.native_trace, 'evidence_fault', False):
+                raise HealthBlocked('evidence_unavailable', 'Sessielog niet schrijfbaar; geen invoer verstuurd.')
             started = time.monotonic()
             try:
                 control_attempted = True

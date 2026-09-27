@@ -261,6 +261,8 @@ func status() -> [String: Any] {
             "autonomousMixing": isControlWorker ? false : DJSessionHost.shared.running,
             "controlWorker":isControlWorker,"demoRole":nativeProcessRole.demoName as Any? ?? NSNull(),
             "readOnly":nativeProcessRole == .demoObserver, "protocolVersion": 3, "bridgePID": getpid(),
+            "sourceCommit":Bundle.main.object(forInfoDictionaryKey:"JevSourceCommit") as? String ?? "unknown",
+            "sourceDigest":Bundle.main.object(forInfoDictionaryKey:"JevSourceDigest") as? String ?? "unknown",
             "contextualTransport": ["version":2,"emptyDeckLoad":true,"replaceStoppedLoad":true,"replaceStopped":true,"desiredPlayback":true,"folder26":true],
             "nativeMixGuards":["version":1,"freshAlignmentBeforeInput":true,"typedPreDispatchRejections":true,
                                "expectedTracksAndDeadline":true,"mixStep":true,"mixGesture":true,"closeStoppedDeck":true,"openSilentDeck":true], "inlineMixerObservation":true]
@@ -659,7 +661,20 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
         DJSessionHost.shared.stop()
         return ["stopRequested":true]
     case "activate":
-        try app().activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        let rekordbox = try app()
+        _ = rekordbox.activate(options:[.activateAllWindows])
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != rekordbox.processIdentifier,
+           let url = rekordbox.bundleURL {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            let _: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
+                NSWorkspace.shared.openApplication(at:url,configuration:config) { application,error in
+                    if let error { continuation.resume(throwing:error) }
+                    else if let application { continuation.resume(returning:application) }
+                    else { continuation.resume(throwing:BridgeError("Focusherstel niet bevestigd.")) }
+                }
+            }
+        }
         return ["activationRequested":true]
     case "quit":
         if !isControlWorker { DJSessionHost.shared.stop() }

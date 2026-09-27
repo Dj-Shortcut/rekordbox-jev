@@ -8,6 +8,7 @@ import asyncio
 from copy import deepcopy
 import time
 
+from .health import HealthBlocked, RecoveryBudget
 from .events import emit
 from .state import ENDPOINT_TOLERANCE, number
 from .recovery import MixReadbackIncomplete, mixer_state, control_state, same_control_state
@@ -46,6 +47,13 @@ class Runner:
         self._reconciliation = None
         self._reconciliation_failures = 0
         self._mix_recovery_count = 0
+        self._health_generation = getattr(env, 'health_generation', 0)
+        self._observation_failure_since = None
+        self._last_valid_observation = None
+        self._api_failures = RecoveryBudget(3, 'api_recovery')
+        self._api_retry_after = float('-inf')
+        self._last_good_snapshot = None
+        self._expected_identities = None
 
     def request_stop(self):
         self.stopping = True
@@ -173,6 +181,8 @@ class Runner:
     def _retire_pending_request(self):
         """Cancel an obsolete request; drain it before allowing a fresh request."""
         if self._api_task is not None and not self._api_task.done():
+            if self._api_context is not None:
+                self.emit('ignored', request_id=self._api_context['id'], reason='recovery_requires_fresh_request')
             self._api_task.cancel()
 
     def _reset_reconciliation_streak(self):
@@ -185,19 +195,84 @@ class Runner:
         result = await self.env.observe()
         return started, result
 
+    def _block_health(self, error):
+        """Latch a precise stop reason without stopping deck playback."""
+        if self.blocked:
+            return
+        self.blocked = True
+        if hasattr(self.env, 'inhibit'):
+            self.env.inhibit()
+        self._retire_pending_request()
+        self.emit('error', stage='health', reason=error.code, message=str(error))
+
+    def _begin_health_reconciliation(self, before):
+        """A repaired process/focus requires new stable reads and a new answer."""
+        self._epoch += 1
+        self._retire_pending_request()
+        self._last_actuation_end = self.clock()
+        self._reconciliation = {'request_id': None,
+            'context': {'decision': {'transport': 'health'}, 'before_snapshot': deepcopy(self._last_good_snapshot or before)},
+            'last_key': None, 'stable': 0, 'reads': 0, 'deadline': self.clock()+8}
+        self.emit('execution_reconciling', request_id=None,
+                  message='Verbinding hersteld; twee nieuwe stabiele waarnemingen afwachten.',
+                  partial=False, verified=False)
+
+    def _observation_unavailable(self):
+        """Interrupt decision making while a screen is unavailable, with a deadline."""
+        if self._observation_failure_since is None:
+            self._observation_failure_since = self.clock()
+            self._epoch += 1
+            self._retire_pending_request()
+        self._reset_reconciliation_streak()
+
     def _observe_done(self):
         """Consume a read and advance recovery only on consecutive stable controls."""
         task, self._observe_task = self._observe_task, None
         try:
             started, snapshot = task.result()
             self.sequence += 1
+            previous = self.latest
+            identity = self._identities(snapshot)
+            if (identity is not None and not self.busy and started >= self._last_actuation_end
+                    and self._reconciliation is None and self._recovery is None):
+                if self._expected_identities is not None and identity != self._expected_identities:
+                    self._block_health(HealthBlocked('tracks_changed',
+                        'Tracks veranderden buiten een bevestigde laadactie; bediening onderbroken.'))
+                else:
+                    self._expected_identities = identity
             self.latest = deepcopy(snapshot)
+            generation = getattr(self.env, 'health_generation', 0)
+            if generation != self._health_generation:
+                self._health_generation = generation
+                if not self.blocked and not self.busy and self._recovery is None and self._reconciliation is None:
+                    self._begin_health_reconciliation(previous)
+            if self.valid(snapshot):
+                self._last_valid_observation = self.clock()
+                if self._observation_failure_since is not None:
+                    if not self.blocked and not self.busy and self._recovery is None and self._reconciliation is None:
+                        self._begin_health_reconciliation(previous)
+                    self._observation_failure_since = None
+            else:
+                self._observation_unavailable()
+            if self.valid(snapshot):
+                self._last_good_snapshot = deepcopy(snapshot)
             self._invalidate_transition(snapshot)
             self._latest_observation_start = started
             self.emit('snapshot', snapshot=self.latest, valid=self.valid(snapshot), seconds=self.clock()-started)
             if self._reconciliation is not None and started >= self._last_actuation_end:
                 reconciliation = self._reconciliation
                 key = control_state(snapshot)
+                before_identity = self._identities(reconciliation['context'].get('before_snapshot'))
+                transport = reconciliation['context']['decision'].get('transport', '')
+                if (key is not None and before_identity is not None
+                        and transport in ('health', 'play_A', 'play_B', 'prepare_A', 'prepare_B',
+                                          'align_A', 'align_B', 'reset_A', 'reset_B',
+                                          'stop_A', 'stop_B', 'echo_A', 'echo_B')
+                        and self._identities(snapshot) != before_identity):
+                    self._reconciliation = None
+                    self._block_health(HealthBlocked('tracks_changed',
+                        'Tracks veranderden onverwacht tijdens herstel; bediening onderbroken.'))
+                    return
                 if key is not None:
                     if same_control_state(reconciliation['last_key'], key):
                         reconciliation['stable'] += 1
@@ -206,6 +281,14 @@ class Runner:
                     reconciliation['last_key'] = key
                     reconciliation['reads'] += 1
                     if reconciliation['stable'] >= 2:
+                        self._expected_identities = self._identities(snapshot)
+                        decision = reconciliation['context']['decision']
+                        control = decision.get('transport', '')
+                        if (control in ('load_A', 'load_B') and decision.get('track_id')
+                                and snapshot['decks'][control[-1]].get('track_id') == decision['track_id']):
+                            # The new track is observed, even if its command reply was lost.
+                            # Keep selection history without claiming a verified execution.
+                            self.recent_tracks = (self.recent_tracks+[decision['track_id']])[-12:]
                         self._remember_launch(reconciliation['context'], snapshot,
                                               source='observed_silent_successor_start')
                         self._reconciliation = None
@@ -247,6 +330,9 @@ class Runner:
             pass
         except Exception as error:
             self.latest = None
+            self._observation_unavailable()
+            if isinstance(error, HealthBlocked):
+                self._block_health(error)
             self._reset_reconciliation_streak()
             if self._recovery is not None:
                 self._recovery['positions'] = None
@@ -291,6 +377,8 @@ class Runner:
                     context, message='Bediening niet bevestigd; Rekordbox opnieuw uitlezen.',
                     error_type='execution_unconfirmed')
                 return
+            if str(context['decision'].get('transport', '')).startswith('load_'):
+                self._expected_identities = self._identities(result.get('snapshot'))
             self.history.append({'decision': context['decision'], 'verified': True, 'time': self.clock()})
             self._remember_verified(context,result)
             if result.get('dispatched') is True and context['decision'].get('transport') != 'hold':
@@ -307,6 +395,9 @@ class Runner:
         except asyncio.CancelledError:
             pass
         except Exception as error:
+            if isinstance(error, HealthBlocked):
+                self._block_health(error)
+                return
             if (type(error) is MixReadbackIncomplete and context['decision'].get('transport') == 'mix'
                     and self._mix_recovery_count < 2
                     and self._identities(error.snapshot) == self._identities(context['before_snapshot'])
@@ -321,6 +412,7 @@ class Runner:
                           attempt=self._mix_recovery_count)
                 return
             if self.explicitly_rejected_before_input(error):
+                self._expected_identities = None
                 # No input occurred. Discard this answer; the actuation epoch
                 # and completion barrier above require a later observation and
                 # a new Jev response, never a replay of the rejected decision.
@@ -373,7 +465,16 @@ class Runner:
         except asyncio.CancelledError:
             pass
         except Exception as error:
-            self.emit('error', stage='inference', request_id=context['id'], error_type=type(error).__name__, message=str(error))
+            try:
+                if getattr(error, 'code', None) == 'api_authentication':
+                    raise HealthBlocked('api_authentication', 'API-toegang geweigerd; geen nieuwe aanvraag verstuurd.')
+                attempt = self._api_failures.consume()
+                self._api_retry_after = self.clock()+min(2., .25*2**(attempt-1))
+                self._epoch += 1
+                self._last_actuation_end = self.clock()
+            except HealthBlocked as blocked:
+                self._block_health(blocked)
+            self.emit('error', stage='inference', reason=getattr(error, 'code', 'invalid_model_answer'), request_id=context['id'], error_type=type(error).__name__, message=str(error))
 
     async def run(self):
         self.emit('started')
@@ -387,7 +488,13 @@ class Runner:
                     self._observe_done()
                 if self._api_task is not None and self._api_task.done():
                     self._api_done()
+                if self.blocked and hasattr(self.env, 'inhibit'):
+                    self.env.inhibit()
                 now = self.clock()
+                if (not self.blocked and self._observation_failure_since is not None
+                        and now-self._observation_failure_since >= 12):
+                    self._block_health(HealthBlocked('observation_timeout',
+                        'Geen geldige waarneming binnen de hersteltijd; bediening onderbroken.'))
                 if self._recovery is not None and now >= self._recovery['deadline']:
                     self._recovery = None
                     self.blocked = True
@@ -405,6 +512,7 @@ class Runner:
                 if (not self.blocked and self._recovery is None and self._reconciliation is None
                         and self._api_task is None and self.valid(self.latest)
                         and fresh_after_action and self.sequence != self._last_request_snapshot
+                        and now >= self._api_retry_after
                         and now-self._last_request_start >= self.decision_interval):
                     try:
                         request = self.policy.prepare(deepcopy(self.latest), deepcopy(self.policy_history()), self.busy)

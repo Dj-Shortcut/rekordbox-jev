@@ -43,7 +43,7 @@ def native_parameters(parameters):
 
 
 def native_result_summary(result):
-    summary = _scalars(result, ('dispatched', 'commandsSent', 'verified', 'crossfaderVerified',
+    summary = _scalars(result, ('dispatched', 'commandsSent', 'partial', 'verified', 'crossfaderVerified',
         'bassDirectionVerified', 'effectOffVerified', 'effect', 'deck', 'beats', 'amountPointer', 'closedDeck', 'pointerActions', 'elapsedMS', 'pairMS',
         'latenessMS', 'search_seconds', 'stepsCompleted', 'stepsRequested', 'appliedBassPixels',
         'requestedCrossfader', 'measuredCrossfader',

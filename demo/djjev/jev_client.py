@@ -11,7 +11,9 @@ MODEL = 'jev-latest'
 
 
 class ClientError(RuntimeError):
-    pass
+    def __init__(self, message, code='api_error'):
+        super().__init__(message)
+        self.code = code
 
 
 class JevClient:
@@ -71,7 +73,7 @@ class JevClient:
                 raise
             except (OSError, http.client.HTTPException):
                 self._drop()
-                raise ClientError('TypeSafe connection interrupted; no answer was substituted.') from None
+                raise ClientError('TypeSafe connection interrupted; no answer was substituted.', 'api_connection') from None
 
     async def ask(self, request):
         if (not isinstance(request, dict) or request.get('model') != MODEL
@@ -93,7 +95,7 @@ class JevClient:
                 for attempt in range(3):
                     remaining = self.timeout-(self._clock()-started)
                     if remaining <= 0:
-                        raise ClientError('TypeSafe answer deadline exceeded.')
+                        raise ClientError('TypeSafe answer deadline exceeded.', 'api_timeout')
                     status, retry_header, data = await asyncio.wait_for(
                         asyncio.to_thread(self._post, body, started+self.timeout, generation), timeout=remaining)
                     if status in (429, 529) and attempt < 2:
@@ -103,19 +105,21 @@ class JevClient:
                         except (TypeError, ValueError):
                             pass
                         if self._clock()-started+delay >= self.timeout:
-                            raise ClientError('TypeSafe rate-limit deadline exceeded.')
+                            raise ClientError('TypeSafe rate-limit deadline exceeded.', 'api_rate_limit')
                         await self._sleep(delay)
                         continue
                     if status < 200 or status >= 300:
-                        raise ClientError(f'TypeSafe HTTP {status}; no answer was substituted.')
+                        raise ClientError(f'TypeSafe HTTP {status}; no answer was substituted.',
+                                          'api_authentication' if status in (401, 403) else
+                                          'api_rate_limit' if status in (429, 529) else 'api_http')
                     try:
                         response = json.loads(data)
                     except (ValueError, UnicodeError):
-                        raise ClientError('TypeSafe returned invalid JSON.') from None
+                        raise ClientError('TypeSafe returned invalid JSON.', 'invalid_model_answer') from None
                     if (not isinstance(response, dict) or not isinstance(response.get('model'), str)
                             or not isinstance(response.get('answers'), dict)
                             or set(response['answers']) != set(payload['questions'])):
-                        raise ClientError('TypeSafe response does not match the requested questions.')
+                        raise ClientError('TypeSafe response does not match the requested questions.', 'invalid_model_answer')
                     return {**response, 'request_seconds': self._clock()-started}
                 raise ClientError('TypeSafe is temporarily unavailable.')
             except asyncio.CancelledError:
@@ -127,7 +131,7 @@ class JevClient:
             except TimeoutError:
                 self._generation += 1
                 self._drop()
-                raise ClientError('TypeSafe answer deadline exceeded.') from None
+                raise ClientError('TypeSafe answer deadline exceeded.', 'api_timeout') from None
 
     async def close(self):
         self._closed = True

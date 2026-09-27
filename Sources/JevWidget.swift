@@ -437,6 +437,10 @@ private struct Inspector: View {
             .scrollIndicators(.visible)
             .frame(maxWidth:.infinity,maxHeight:.infinity)
             .measureWidgetHeight("viewport")
+            Text("DJ Jev " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "?")
+                 + " · " + String((Bundle.main.object(forInfoDictionaryKey:"JevSourceCommit") as? String ?? "onbekende build").prefix(8))
+                 + " · protocol " + String(Bundle.main.object(forInfoDictionaryKey:"JevProtocolVersion") as? Int ?? 0))
+                .font(.system(size:9)).foregroundStyle(muted)
             HStack(alignment:.center,spacing:12) {
                 Button {
                     resumeFollowing()
@@ -451,7 +455,7 @@ private struct Inspector: View {
                         .fixedSize(horizontal:false,vertical:true)
                 }
             }
-            if (probe.running && monitor.sessionPhase.contains("blocked")) || (!probe.status.isEmpty && probe.status != "DJ Jev gestopt · muziek blijft spelen") {
+            if monitor.sessionPhase.contains("blocked") || (!probe.status.isEmpty && probe.status != "DJ Jev gestopt · muziek blijft spelen") {
                 Text(probe.status.isEmpty ? monitor.sessionAction : probe.status)
                     .font(.system(size:11)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
             }

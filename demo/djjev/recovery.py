@@ -11,7 +11,7 @@ TARGET_REASONS = frozenset(('crossfader_not_at_target', 'bass_direction_not_conf
 
 
 def mixer_state(snapshot, titles):
-    if not isinstance(snapshot, dict) or snapshot.get('valid') is not True:
+    if not isinstance(snapshot, dict) or snapshot.get('valid') is not True or snapshot.get('folder') != '26':
         return None
     mixer = snapshot.get('mixer', {})
     if mixer.get('aligned') is not True or not number(mixer.get('cross'), 0, 1):
@@ -58,7 +58,7 @@ def reconcileable_mix(result, snapshot, titles):
 
 def control_state(snapshot):
     """Project readable controls, excluding advancing clocks and effect cooldown."""
-    if not isinstance(snapshot, dict) or snapshot.get('valid') is not True:
+    if not isinstance(snapshot, dict) or snapshot.get('valid') is not True or snapshot.get('folder') != '26':
         return None
     decks = snapshot.get('decks', {})
     mixer = snapshot.get('mixer', {})

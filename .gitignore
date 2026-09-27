@@ -27,3 +27,6 @@ venv/
 *.jpg
 *.mp4
 rekordbox.xml
+
+# Generated identity stamped into both signed apps
+build-info.json

@@ -21,5 +21,6 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+python3 "$project_dir/scripts/build_info.py" "$app_dir"
 python3 "$project_dir/scripts/sign_app.py" "$app_dir" local.rekordbox.bridge
 echo "$app_dir"
