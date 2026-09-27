@@ -59,10 +59,13 @@ jobs:
       - name: Actieve DJ Jev-kern (demo/)
         working-directory: demo
         run: python -m unittest discover -s tests -v
-      - name: Bridge- en scripttests inclusief Swift marker-alignment
+      - name: Bridge- en scripttests inclusief native bediening en widget
         # Explicit bash enables pipefail, so a failing suite is not masked by tee.
         shell: bash
         run: python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
-      - name: Controleer dat de Swift marker-alignmenttest echt draaide
+      - name: Controleer dat de drie Mac-controles echt draaiden
         shell: bash
-        run: grep -E "^test_marker_alignment_cases .* ok$" "$RUNNER_TEMP/test-output.txt"
+        run: |
+          grep -E "^test_marker_alignment_cases .* ok$" "$RUNNER_TEMP/test-output.txt"
+          grep -E "^test_native_transport_cases .* ok$" "$RUNNER_TEMP/test-output.txt"
+          grep -E "^test_widget_typecheck .* ok$" "$RUNNER_TEMP/test-output.txt"

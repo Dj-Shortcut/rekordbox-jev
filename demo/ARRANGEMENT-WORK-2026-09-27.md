@@ -120,9 +120,22 @@ luisterproef; een strakke uitvoering maakt een onnauwkeurig anker niet juist.
 
 De door de gebruiker genoemde CI is alleen-lezen bekeken op GitHub:
 `.github/workflows/tests.yml` start bij zowel `push` als `pull_request`, met
-Python 3.11/3.12/3.13 op Ubuntu en Python 3.12 plus Swift-controles op macOS.
-Die workflow ontbreekt nog in deze lokale checkout. Er is niet gefetcht of
-gemerged, en er is geen push of PR gemaakt. De verduidelijkte afspraak verbiedt
-offline CI niet. Voor latere PR-overdracht: eerst de nieuwe remote basis veilig
-verwerken en de resterende audio- en arrangementonzekerheid expliciet in de PR
-behouden; bovenstaande resultaten gelden voor de huidige lokale wijzigingen.
+Python 3.9–3.13 op Ubuntu en Python 3.12 plus systeem-Python/Swift op macOS.
+Inmiddels is `origin/main` met de gemergede PR #5 (`11b63a5`) zonder conflicten
+in de lokale werkbranch `codex/mix-entry-clock` opgenomen. Daarmee zijn Claudes
+Python 3.9/3.10-timeoutcorrectie, timingfixtures en CI voor Python 3.9–3.13
+behouden. De actieve suite slaagt daarna opnieuw onder Python 3.14.6 en Apple's
+Python 3.9.6: beide 296 tests, OK, zeven optionele DSP-tests overgeslagen.
+
+`tests/test_native_transport.py` sluit nu ook de volledige native harness aan op
+unittest discovery. Op macOS compileert die de daadwerkelijke bridge met een
+test-entrypoint en voert gesimuleerde bediening in de observer- en controlrol
+uit. Een tweede test controleert de widgetcompilatie. Beide slagen lokaal.
+De CI vereist expliciet dat marker-, transport- en widgetcontrole echt zijn
+uitgevoerd; overslaan kan de macOS-job niet ten onrechte groen maken.
+Op Linux worden alleen deze Mac-specifieke controles overgeslagen.
+
+De klokhelper waar Claude afzonderlijk aan werkt is niet in deze wijziging
+opgenomen. PR #5 constateerde dat Apple's Python voor deadlinevergelijkingen
+nog niet dezelfde klokbasis gebruikt als Swift. Geslaagde fixtures bewijzen
+daarom nog geen werkende live set onder Apple's Python.

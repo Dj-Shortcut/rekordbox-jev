@@ -4,7 +4,7 @@ Status: bestaande opname en sessielog onderzocht; lokale correctie geschreven.
 De gebruiker verduidelijkte dat alleen muziek en live mixproeven vanavond niet
 gewenst zijn. Offline codecontroles zijn daarna geslaagd; zie het
 [controleverslag](ARRANGEMENT-WORK-2026-09-27.md). De correctie is niet
-geïnstalleerd of gepubliceerd en er is geen nieuwe Rekordbox-sessie gestart.
+geïnstalleerd en er is geen nieuwe Rekordbox-sessie gestart.
 
 ## Bewijs
 
