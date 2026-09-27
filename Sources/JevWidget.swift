@@ -453,9 +453,7 @@ private struct Inspector: View {
             .scrollIndicators(.visible)
             .frame(maxWidth:.infinity,maxHeight:.infinity)
             .measureWidgetHeight("viewport")
-            Text("DJ Jev " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "?")
-                 + " · " + String((Bundle.main.object(forInfoDictionaryKey:"JevSourceCommit") as? String ?? "onbekende build").prefix(8))
-                 + " · protocol " + String(Bundle.main.object(forInfoDictionaryKey:"JevProtocolVersion") as? Int ?? 0))
+            Text(verbatim:buildLabel)
                 .font(.system(size:9)).foregroundStyle(muted)
             HStack(alignment:.center,spacing:12) {
                 Button {
@@ -589,6 +587,13 @@ private struct Inspector: View {
         .padding(.vertical,1)
     }
 
+    private var buildLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "?"
+        let commit = Bundle.main.object(forInfoDictionaryKey:"JevSourceCommit") as? String ?? "onbekende build"
+        let protocolVersion = Bundle.main.object(forInfoDictionaryKey:"JevProtocolVersion") as? Int ?? 0
+        return "DJ Jev \(version) · \(commit.prefix(8)) · protocol \(protocolVersion)"
+    }
+
     @ViewBuilder private func contextView(_ run: Run) -> some View {
         let context = object(run.state["dj_context"])
         let situation = string(context["situation"])
@@ -606,11 +611,12 @@ private struct Inspector: View {
         ForEach(decks.keys.sorted(),id:\.self) { name in
             let deck = object(decks[name])
             let details = object(object(context["decks"])[name])
+            let playback: String = "Speelt: \(readable(deck["playing"])) · Positie: \(readable(deck["elapsed"])) s · Resterend: \(readable(deck["remaining"])) s"
             Card {
                 Text("Deck " + name + " · " + readable(deck["title"])).font(.headline).fixedSize(horizontal:false,vertical:true)
                 Text("Genre: " + readable(details["genre"]) + " · Tempo: " + readable(deck["bpm"]) + " · Toonaard: " + readable(deck["key"]))
                     .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
-                Text("Speelt: " + readable(deck["playing"]) + " · Positie: " + readable(deck["elapsed"]) + " s · Resterend: " + readable(deck["remaining"]) + " s")
+                Text(verbatim:playback)
                     .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
                 Text("Audioanalyse: " + readable(details["audio_evidence"]) + " · Zang: " + readable(details["vocal_activity"]))
                     .font(.system(size:11)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)

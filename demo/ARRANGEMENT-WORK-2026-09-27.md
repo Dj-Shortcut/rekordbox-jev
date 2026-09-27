@@ -135,6 +135,12 @@ De CI vereist expliciet dat marker-, transport- en widgetcontrole echt zijn
 uitgevoerd; overslaan kan de macOS-job niet ten onrechte groen maken.
 Op Linux worden alleen deze Mac-specifieke controles overgeslagen.
 
+De eerste GitHub-run vond daarbij twee bestaande SwiftUI-tekstuitdrukkingen
+die de compiler van de runner niet binnen zijn typecontrolebudget kon oplossen.
+De buildregel en afspeelregel zijn opgesplitst in expliciete strings, met dezelfde
+zichtbare tekst. Dit was lokaal niet zichtbaar en onderstreept waarom de nieuwe
+widgetcontrole in CI nodig is.
+
 De klokhelper waar Claude afzonderlijk aan werkt is niet in deze wijziging
 opgenomen. PR #5 constateerde dat Apple's Python voor deadlinevergelijkingen
 nog niet dezelfde klokbasis gebruikt als Swift. Geslaagde fixtures bewijzen
