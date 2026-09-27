@@ -9,17 +9,35 @@ final class JevProbeControls: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var busy = false
     @Published private(set) var status = ""
+    @Published private(set) var connected = false
     private var timer: Timer?
     private var checking = false
     private var generation = 0
 
     init() {
-        Task { [weak self] in await self?.refresh() }
+        // Preview and command-line checks must never open apps or start a set.
+        let preview = CommandLine.arguments.contains("--evidence-root")
+            || Bundle.main.object(forInfoDictionaryKey:"JevPreviewRoot") != nil
+        if !preview { Task { [weak self] in await self?.connectOnOpen() } }
         timer = Timer.scheduledTimer(withTimeInterval:0.5, repeats:true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.refresh() }
         }
     }
     deinit { timer?.invalidate() }
+
+    private func connectOnOpen() async {
+        busy = true
+        status = "Verbinden…"
+        do {
+            try await ensureBridgeForStart()
+            try await ensureRekordboxForStart()
+            connected = true
+            status = ""
+        } catch let error as JevProbeError { status = error.message }
+        catch { status = "Verbinding niet beschikbaar. Probeer Start set opnieuw." }
+        busy = false
+        await refresh()
+    }
 
     private func refresh() async {
         guard !checking, !busy else { return }
@@ -30,13 +48,46 @@ final class JevProbeControls: ObservableObject {
             let active = try await Task.detached(priority:.utility) { try JevProbeSocket.active() }.value
             guard generation == observedGeneration else { return }
             let previouslyRunning = running
+            connected = !NSRunningApplication.runningApplications(withBundleIdentifier:"com.pioneerdj.rekordboxdj").isEmpty
             running = active
-            if active { status = "" }
-            else if previouslyRunning { status = "DJ Jev gestopt · muziek blijft spelen" }
+            reserveControlSpace(active:active)
+            status = Self.statusAfterConnection(active:active, wasRunning:previouslyRunning, previous:status)
         } catch {
             guard generation == observedGeneration else { return }
+            connected = false
             // Unknown connectivity must not present Start while a set may run.
             status = running ? "Bridge niet bereikbaar · de set kan nog draaien" : "Bridge niet bereikbaar"
+        }
+    }
+
+    static func statusAfterConnection(active: Bool, wasRunning: Bool, previous: String) -> String {
+        if active { return "" }
+        if wasRunning { return "DJ Jev gestopt · muziek blijft spelen" }
+        // A successful status reply resolves connectivity, not a credential or
+        // start failure. Keep those errors until the user explicitly retries.
+        if previous == "Bridge niet bereikbaar" || previous == "Bridge niet bereikbaar · de set kan nog draaien" {
+            return ""
+        }
+        return previous
+    }
+
+    // The calibrated native controls occupy the left/center of Rekordbox.
+    // A nonactivating floating panel can intercept HID input without changing
+    // frontmostApplication. Keep this panel outside those control coordinates.
+    private func reserveControlSpace(active: Bool) {
+        for panel in NSApp.windows where panel.title == "DJ Jev" {
+            panel.isMovable = !active
+            if active {
+                panel.styleMask.remove(.resizable)
+                guard let screen = panel.screen ?? NSScreen.main else { continue }
+                let bounds = screen.visibleFrame.insetBy(dx:12,dy:12)
+                var frame = panel.frame
+                let top = min(bounds.maxY,frame.maxY)
+                frame.size.width = min(400,bounds.width*0.30)
+                frame.size.height = min(frame.height,bounds.height)
+                frame.origin = NSPoint(x:bounds.maxX-frame.width,y:max(bounds.minY,top-frame.height))
+                if panel.frame != frame { panel.setFrame(frame,display:true) }
+            } else { panel.styleMask.insert(.resizable) }
         }
     }
 
@@ -52,11 +103,16 @@ final class JevProbeControls: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
+                try await self.ensureBridgeForStart()
+                self.status = "Verbinding en macOS-toestemming controleren…"
                 let needsStart = try await Task.detached(priority:.userInitiated) {
-                    try JevProbeSocket.prepareStart()
+                    try JevProbeSocket.prepareStart(interactive:true)
                 }.value
                 if needsStart {
+                    self.status = "Rekordbox openen…"
+                    try await self.ensureRekordboxForStart()
                     self.status = "Rekordbox naar voren brengen…"
+                    self.reserveControlSpace(active:true)
                     let rekordboxPID = try await self.bringExistingRekordboxForward()
                     // Confirm focus after the asynchronous readiness check, just
                     // before starting. A successful activate() request alone is
@@ -79,6 +135,50 @@ final class JevProbeControls: ObservableObject {
             await self.refresh()
         }
     }
+    private func openRequiredApp(_ url: URL, identifier: String, activates: Bool = false) async throws {
+        guard Bundle(url:url)?.bundleIdentifier == identifier else {
+            throw JevProbeError("Benodigde app niet gevonden: " + url.lastPathComponent)
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = activates
+        let application: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
+            NSWorkspace.shared.openApplication(at:url,configuration:configuration) { app, error in
+                if let error { continuation.resume(throwing:error) }
+                else if let app { continuation.resume(returning:app) }
+                else { continuation.resume(throwing:JevProbeError("App openen niet bevestigd.")) }
+            }
+        }
+        guard application.bundleIdentifier == identifier else {
+            throw JevProbeError("Onverwachte app; de set is niet gestart.")
+        }
+    }
+    private func ensureBridgeForStart() async throws {
+        if NSRunningApplication.runningApplications(withBundleIdentifier:"local.rekordbox.bridge").isEmpty {
+            status = "Jev-verbinding openen…"
+            let url = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Rekordbox Bridge.app")
+            try await openRequiredApp(url,identifier:"local.rekordbox.bridge")
+        }
+        // App launch can return before its local socket starts accepting requests.
+        // These checks never authorize, load, play, or create a second session.
+        for attempt in 0..<5 {
+            do {
+                _ = try await Task.detached(priority:.utility) { try JevProbeSocket.active() }.value
+                return
+            } catch {
+                if attempt == 4 { throw error }
+                try await Task.sleep(nanoseconds:200_000_000)
+            }
+        }
+    }
+    private func ensureRekordboxForStart() async throws {
+        if NSRunningApplication.runningApplications(withBundleIdentifier:"com.pioneerdj.rekordboxdj").isEmpty {
+            let url = URL(fileURLWithPath:"/Applications/rekordbox 6/rekordbox.app")
+            guard (Bundle(url:url)?.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String)?.hasPrefix("6.8.7") == true else {
+                throw JevProbeError("De afgesproken Rekordbox 6.8.7 is niet gevonden; de set is niet gestart.")
+            }
+            try await openRequiredApp(url,identifier:"com.pioneerdj.rekordboxdj")
+        }
+    }
     private func bringExistingRekordboxForward() async throws -> pid_t {
         let applications = NSRunningApplication.runningApplications(withBundleIdentifier:"com.pioneerdj.rekordboxdj")
             .filter { !$0.isTerminated }
@@ -92,15 +192,18 @@ final class JevProbeControls: ObservableObject {
         NSApp.keyWindow?.resignKey()
         // On macOS 14+, ignoringOtherApps has no effect. If the widget owns
         // activation, explicitly yield it through AppKit's cooperative API.
-        let activationRequested: Bool
         if NSApp.isActive {
             NSApp.yieldActivation(to:rekordbox)
-            activationRequested = rekordbox.activate(from:NSRunningApplication.current, options:[.activateAllWindows])
+            _ = rekordbox.activate(from:NSRunningApplication.current, options:[.activateAllWindows])
         } else {
-            activationRequested = rekordbox.activate(options:[.activateAllWindows])
+            _ = rekordbox.activate(options:[.activateAllWindows])
         }
-        guard activationRequested else {
-            throw JevProbeError("Rekordbox kon niet naar voren worden gebracht; de set is niet gestart.")
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+            // Reopen through Launch Services, just as opening the existing app
+            // from Finder/Dock. A nonactivating panel may not own activation to
+            // yield. Never create a second Rekordbox instance.
+            guard let url = rekordbox.bundleURL else { throw JevProbeError("Rekordbox-app niet gevonden.") }
+            try await openRequiredApp(url,identifier:"com.pioneerdj.rekordboxdj",activates:true)
         }
         let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
         while DispatchTime.now().uptimeNanoseconds < deadline {
@@ -153,7 +256,7 @@ private enum JevProbeSocket {
         return active
     }
 
-    static func prepareStart() throws -> Bool {
+    static func prepareStart(interactive: Bool = false) throws -> Bool {
         let initial = try request("status", timeout:3)
         guard let version = initial["protocolVersion"] as? Int, version >= 3 else {
             throw JevProbeError("Deze Bridge ondersteunt de set niet; protocol 3 is vereist.")
@@ -163,8 +266,27 @@ private enum JevProbeSocket {
         }
         // Reopening the widget attaches to the running set, without another start.
         if active { return false }
-        // Noninteractive: cached key, or a clear error. Never djAuthorize.
-        let ready = try request("djReady", timeout:10)
+        // Only the explicit Start click may request the normal Keychain dialog.
+        // Polling and readiness checks stay noninteractive; the widget never sees a key.
+        let ready: [String:Any]
+        // A Start click permits the ordinary Keychain prompt immediately.
+        // A failed noninteractive read can remain blocked inside Security and
+        // prevent a later interactive read from ever opening its dialog.
+        do {
+            ready = try request(interactive ? "djAuthorize" : "djReady", timeout:12)
+        } catch {
+            guard interactive else { throw error }
+            // The host retains an in-flight macOS prompt after its short IPC
+            // deadline. Poll state only; never enqueue another credential read.
+            var state = try request("djCredentialStatus", timeout:3)
+            let until = now + 120
+            while state["authorizationPending"] as? Bool == true && now < until {
+                Thread.sleep(forTimeInterval:0.5)
+                state = try request("djCredentialStatus", timeout:3)
+            }
+            guard state["credentialAvailable"] as? Bool == true else { throw error }
+            ready = state
+        }
         guard ready["credentialAvailable"] as? Bool == true else {
             throw JevProbeError("De bestaande sleutel is niet beschikbaar; geen wachtwoord gevraagd.")
         }
@@ -206,7 +328,7 @@ private enum JevProbeSocket {
     }
 
     private static func request(_ command: String, timeout: Double) throws -> [String: Any] {
-        guard ["status", "djReady", "djStart", "djStop"].contains(command) else {
+        guard ["status", "djReady", "djAuthorize", "djCredentialStatus", "djStart", "djStop"].contains(command) else {
             throw JevProbeError("Onbekende setaanvraag geweigerd.")
         }
         let deadline = now + timeout

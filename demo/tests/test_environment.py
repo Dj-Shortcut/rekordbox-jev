@@ -24,12 +24,12 @@ class Native:
     async def start(self): pass
     async def close(self): self.stopped = True
 
-    def move(self, deck, delta):
+    def move(self, deck, delta, band='low'):
         if self.mode == 'immobile': return
         key = str(deck)
-        angle = max(-1., min(0., self.raw['mixer']['eq_position'][key]['low']+delta))
-        self.raw['mixer']['eq_position'][key]['low'] = angle
-        self.raw['mixer']['eq_neutral'][key]['low'] = angle == 0.
+        angle = max(-1., min(0., self.raw['mixer']['eq_position'][key][band]+delta))
+        self.raw['mixer']['eq_position'][key][band] = angle
+        self.raw['mixer']['eq_neutral'][key][band] = angle == 0.
 
     async def call(self, role, name, **params):
         self.calls.append((role, name, deepcopy(params)))
@@ -65,7 +65,7 @@ class Native:
             assert self.raw['faders']['deck'+str(params['deck'])] >= .9
             assert params['expectedTracks'] == {str(d['deck']):d['title'] for d in self.raw['decks']}
             self.raw['mixer']['crossfader_position'] = 0. if params['deck']==1 else 1.
-        elif name == 'eq': self.move(params['deck'], -params['pixels']*.02)
+        elif name == 'eq': self.move(params['deck'], -params['pixels']*.02, params['band'])
         elif name == 'eqReset':
             if self.mode == 'reset_failure': result['verified'] = False
             else:
@@ -102,7 +102,7 @@ def low(frame, deck, angle):
 
 
 def decision(**values):
-    mixing=any(values.get(k,'hold')!='hold' for k in ('crossfader','bass'))
+    mixing=any(values.get(k,'hold')!='hold' for k in ('crossfader','bass','mid','high'))
     return {'expected_titles': {'A': 'One', 'B': 'Two'}, 'transport': 'mix' if mixing else 'hold',
             'crossfader': 'hold', 'bass': 'hold', 'duration_beats': 4, **values}
 
@@ -239,6 +239,28 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 native_result({**reply, **changed})
             self.assertNotIsInstance(caught.exception, NativePreDispatch)
 
+    async def test_changed_title_before_load_recovers_only_without_prior_input(self):
+        for folder_input in (False, True):
+            with self.subTest(folder_input=folder_input):
+                frame = both()
+                frame['playingIndicators'] = {'deck1': False, 'deck2': False}
+                native = Native(frame)
+                original = native.call
+                async def changed_before_load(role, name, **params):
+                    if name == 'loadChosenTrack':
+                        raise NativePreDispatch('tracks_changed', retryable=True)
+                    result = await original(role, name, **params)
+                    if name == 'openFolder26':
+                        result['dispatched'] = folder_input
+                    return result
+                native.call = changed_before_load
+                env = Rekordbox(native, library())
+                with self.assertRaises(NativePreDispatch) as caught:
+                    await env.execute(decision(transport='load_A', track_id=library()[2]['id']), env.snapshot(frame))
+                self.assertEqual(Runner.explicitly_rejected_before_input(caught.exception), not folder_input)
+                self.assertEqual(caught.exception.commands_sent, folder_input)
+                self.assertEqual(native.physical, [])
+
     async def test_partial_bundle_cannot_claim_zero_inputs_or_retry(self):
         frame = both(); low(frame, 2, -.6)
         native = Native(frame)
@@ -356,6 +378,19 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         params = next(p for _,name,p in native.calls if name=='loadChosenTrack')
         self.assertFalse(params['replaceStopped'])
         self.assertFalse(params['allowSilentReplacement'])
+
+    async def test_ended_successor_is_only_closed_for_replacement(self):
+        frame = loaded(both(), 'B', 1, False, ended=True)
+        frame['mixer']['crossfader_position'] = .5
+        frame['mixer']['beat_sync_lit']['2'] = False
+        result, native = await self.run_decision(frame, decision(transport='prepare_B'))
+        self.assertTrue(result['verified'])
+        self.assertEqual([name for _,name,_ in native.physical], ['closeStoppedDeck'])
+        self.assertTrue(result['snapshot']['decks']['A']['playing'])
+        choices = policy.prepare(result['snapshot'], [], False)['questions']['transport']['criteria']
+        self.assertIn('load_B', choices)
+        self.assertNotIn('play_B', choices)
+        self.assertNotIn('prepare_B', choices)
 
     async def test_prepare_binds_shortcut_to_expected_deck_title(self):
         frame = both()

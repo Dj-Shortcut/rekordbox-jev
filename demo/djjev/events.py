@@ -26,6 +26,7 @@ def snapshot_summary(snapshot):
         result['decks'][deck] = _scalars(item, ('title', 'track_id', 'playing', 'bpm', 'bpm_text',
             'channel', 'bass', 'sync', 'master', 'elapsed', 'remaining', 'identity_match'))
         if isinstance(item, dict):
+            result['decks'][deck]['eq_position'] = _scalars(item.get('eq_position'), ('low', 'mid', 'high', 'trim'))
             result['decks'][deck]['eq_neutral'] = _scalars(item.get('eq_neutral'), ('low', 'mid', 'high', 'trim'))
     result['mixer'] = _scalars(snapshot.get('mixer'), ('cross', 'aligned'))
     return result
@@ -43,7 +44,7 @@ def native_parameters(parameters):
 
 def native_result_summary(result):
     summary = _scalars(result, ('dispatched', 'commandsSent', 'verified', 'crossfaderVerified',
-        'bassDirectionVerified', 'closedDeck', 'pointerActions', 'elapsedMS', 'pairMS',
+        'bassDirectionVerified', 'effectOffVerified', 'effect', 'deck', 'beats', 'amountPointer', 'closedDeck', 'pointerActions', 'elapsedMS', 'pairMS',
         'latenessMS', 'search_seconds', 'stepsCompleted', 'stepsRequested', 'appliedBassPixels',
         'requestedCrossfader', 'measuredCrossfader',
         'requestedPlaying', 'playing', 'reason', 'identityMatch'))

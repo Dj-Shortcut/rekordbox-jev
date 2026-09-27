@@ -115,6 +115,11 @@ private final class DJCredentialAccess: @unchecked Sendable {
         defer { credentialLock.unlock() }
         return secret
     }
+    func readiness() -> [String:Bool] {
+        credentialLock.lock()
+        defer { credentialLock.unlock() }
+        return ["credentialAvailable":secret != nil,"authorizationPending":authorizationAttempt != nil]
+    }
 }
 
 // The stable signed Bridge owns the credential and child process. The widget only reads events.
@@ -123,6 +128,7 @@ final class DJSessionHost {
     private let credentials = DJCredentialAccess()
     private var process: Process?
     var running: Bool { process?.isRunning == true }
+    var credentialReadiness: [String:Bool] { credentials.readiness() }
 
     func authorize(interactive: Bool) async throws {
         try await credentials.authorize(interactive:interactive)

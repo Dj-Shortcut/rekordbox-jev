@@ -84,10 +84,14 @@ struct Observation {
         tokens.filter { rect.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY)) }
             .sorted { $0.rect.minX < $1.rect.minX }.map(\.text).joined(separator: " ")
     }
-    var calibrated: Bool {
-        image.width == 1272 && image.height == 768 &&
-        recognizedLayoutHeader(tokens)
+    var baseLayoutRecognized: Bool {
+        image.width == 1272 && image.height == 768 && recognizedLayoutHeader(tokens)
     }
+    var fxPanelVisible: Bool {
+        fxBlueCount(image, CGRect(x:309,y:30,width:14,height:14)) > 25
+    }
+    var calibrated: Bool { baseLayoutRecognized && !fxPanelVisible }
+
     func playing(deck: Int) -> Bool? {
         guard calibrated else { return nil }
         let bitmap = NSBitmapImageRep(cgImage: image)
@@ -115,6 +119,10 @@ struct Observation {
         guard best > 3 else { return nil }
         return min(1,max(0,Double(357-bestY)/35))
     }
+    var deckAssignments: [String:String] {
+        guard calibrated else { return [:] }
+        return MixerVision(bitmap:NSBitmapImageRep(cgImage:image)).deckAssignments
+    }
     var mixerJSON: [String: Any] {
         guard calibrated else { return [:] }
         let bitmap = NSBitmapImageRep(cgImage:image)
@@ -126,28 +134,30 @@ struct Observation {
             guard let c = rgb(x,y) else { return false }
             return c.blueComponent > 0.3 && c.blueComponent > c.redComponent*1.7 && c.greenComponent > 0.2
         }
-        var assignments: [String:String] = [:]
+        let assignments = vision.deckAssignments
         var sync: [String:Bool] = [:], master: [String:Bool] = [:]
         // Keep the calibrated ReadFrame thresholds, but use this observation's
         // own image instead of reading a separately saved screenshot from disk.
         for deck in 1...2 {
-            let left = blue(deck == 1 ? 531 : 553,379)
-            let right = blue(deck == 1 ? 709 : 730,379)
-            assignments[String(deck)] = left && !right ? "left" : right && !left ? "right" : !left && !right ? "unassigned" : "unknown"
             let origin = deck == 1 ? 535 : 1220
-            var blueCount = 0, orangeCount = 0, whiteCount = 0
+            var blueCount = 0, orangeCount = 0, whiteCount = 0, yellowCount = 0
             for x in origin...min(origin+40,1271) {
                 for y in 177...195 { if blue(x,y) { blueCount += 1 } }
                 if x <= origin+25 {
                     for y in 178...194 {
-                        if let c = rgb(x,y), min(c.redComponent,c.greenComponent,c.blueComponent) > 0.70 { whiteCount += 1 }
+                        if let c = rgb(x,y) {
+                            if min(c.redComponent,c.greenComponent,c.blueComponent) > 0.70 { whiteCount += 1 }
+                            // Rekordbox renders BPM SYNC yellow. It still locks
+                            // tempo; phase is independently checked before mixing.
+                            if c.redComponent > 0.55 && c.greenComponent > 0.55 && c.blueComponent < 0.3 { yellowCount += 1 }
+                        }
                     }
                 }
                 for y in 198...209 {
                     if let c = rgb(x,y), c.redComponent > 0.4 && c.greenComponent > 0.2 && c.redComponent > c.blueComponent*2 { orangeCount += 1 }
                 }
             }
-            sync[String(deck)] = blueCount > 8 || whiteCount > 8
+            sync[String(deck)] = blueCount > 8 || whiteCount > 8 || yellowCount > 8
             master[String(deck)] = orangeCount > 6
         }
         var result: [String:Any] = [
@@ -167,6 +177,7 @@ struct Observation {
                       "validationAttempts":validationAttempts,"validationMS":validationMS],
             "window": ["id": window.windowID, "title": window.title ?? "", "width": image.width, "height": image.height],
             "layoutCalibrated": calibrated, "tokens": tokens.map(\.json),
+            "effects": ["subtleEcho":true,"panelVisible":fxPanelVisible],
             "playing": NSNull(), "playingNote": "A single OCR frame does not establish playback or beat phase."
         ]
         if calibrated {
@@ -472,45 +483,71 @@ func sendKey(_ description: String, preDispatch: (() throws -> Void)? = nil) asy
     try await sendPreparedKey(event,preDispatch:preDispatch)
 }
 
+// Round cumulative screen positions, so tiny interpolation steps retain their
+// total travel without gaining distance through independent delta rounding.
+func pointerDelta(from: CGPoint, to: CGPoint) -> (x: Int64, y: Int64) {
+    (Int64(to.x.rounded()-from.x.rounded()), Int64(to.y.rounded()-from.y.rounded()))
+}
+
 func pointer(_ point: CGPoint, observation: Observation, dragTo: CGPoint? = nil, clickCount: Int = 1,
-             preDispatch: (() throws -> Void)? = nil) async throws {
+             preDispatch: (() throws -> Void)? = nil, allowFXPanel: Bool = false) async throws {
     try requireInputAccess()
-    guard observation.calibrated else { throw BridgeError("Onbekende vensterindeling.") }
+    guard observation.calibrated || (allowFXPanel && observation.baseLayoutRecognized && observation.fxPanelVisible) else { throw BridgeError("Onbekende vensterindeling.") }
     func screen(_ p: CGPoint) -> CGPoint {
         CGPoint(x:observation.window.frame.minX + p.x/1272 * observation.window.frame.width,
                 y:observation.window.frame.minY + p.y/768 * observation.window.frame.height)
     }
-    func emit(_ type: CGEventType, _ location: CGPoint, count: Int = 1) {
+    func emit(_ type: CGEventType, _ location: CGPoint, count: Int = 1, from: CGPoint? = nil) {
         let event = CGEvent(mouseEventSource:nil, mouseType:type, mouseCursorPosition:screen(location), mouseButton:.left)
         event?.setIntegerValueField(.mouseEventClickState,value:Int64(count))
+        // Rotary controls consume relative motion. Do not let Quartz derive
+        // that motion from a previous control or a cursor warped by the app.
+        if let from {
+            let delta = pointerDelta(from:screen(from),to:screen(location))
+            event?.setIntegerValueField(.mouseEventDeltaX,value:delta.x)
+            event?.setIntegerValueField(.mouseEventDeltaY,value:delta.y)
+        }
         event?.post(tap:.cghidEventTap)
     }
     try preDispatch?()
     markNativeInputSent()
     emit(.mouseMoved,point)
+    try await Task.sleep(nanoseconds:30_000_000)
+    try requireInputAccess()
+    try preDispatch?()
     emit(.leftMouseDown,point)
+    var releasePoint = point
+    var pressed = true
+    defer { if pressed { emit(.leftMouseUp,releasePoint) } }
     // Native GUI controls need a real press interval, unlike zero-duration synthetic clicks.
     try await Task.sleep(nanoseconds:30_000_000)
     if let target = dragTo {
         for step in 1...12 {
-            emit(.leftMouseDragged,CGPoint(x:point.x+(target.x-point.x)*Double(step)/12,
-                                          y:point.y+(target.y-point.y)*Double(step)/12))
+            let previous = releasePoint
+            releasePoint = CGPoint(x:point.x+(target.x-point.x)*Double(step)/12,
+                                   y:point.y+(target.y-point.y)*Double(step)/12)
+            emit(.leftMouseDragged,releasePoint,from:previous)
             try await Task.sleep(nanoseconds:8_000_000)
         }
         emit(.leftMouseUp,target)
+        pressed = false
     } else {
         emit(.leftMouseUp,point)
+        pressed = false
         if clickCount == 2 {
             try await Task.sleep(nanoseconds:50_000_000)
             emit(.leftMouseDown,point,count:2)
+            pressed = true
             try await Task.sleep(nanoseconds:30_000_000)
             emit(.leftMouseUp,point,count:2)
+            pressed = false
         }
     }
 }
 
 func checkedObservation(recoverablePreDispatch: Bool = false, mixerOnly: Bool = false,
-                        reusingGuardIdentity reference: Observation? = nil) async throws -> Observation {
+                        reusingGuardIdentity reference: Observation? = nil,
+                        inputReserveNS: UInt64 = 150_000_000) async throws -> Observation {
     try requireInputAccess(recoverablePreDispatch:recoverablePreDispatch)
     let validationStarted = DispatchTime.now().uptimeNanoseconds
     // Vision's first recognition can be slower than its warm calls. Recapture
@@ -521,16 +558,19 @@ func checkedObservation(recoverablePreDispatch: Bool = false, mixerOnly: Bool = 
         var observation = try await observe(mixerOnly:mixerOnly,reusingGuardIdentity:reference)
         guard observation.calibrated else { throw BridgeError("De huidige lay-out is nog niet gekalibreerd.") }
         let now = DispatchTime.now().uptimeNanoseconds
-        if observationFresh(sampledAt:observation.sampledAt,now:now) {
+        if observationHasInputBudget(sampledAt:observation.sampledAt,now:now,reserveNS:inputReserveNS) {
             observation.validationAttempts = attempt
             observation.validationMS = Double(now-validationStarted)/1e6
             return observation
         }
     }
+    let exhausted = inputReserveNS > 0
+        ? "Drie verse opnames lieten onvoldoende tijd over voor de volgende bediening."
+        : "Drie verse opnames waren te langzaam voor de 750 ms bedieningsgrens."
     if mayReportNoInput(explicit:recoverablePreDispatch) {
-        throw PreDispatchRejection(code:"observation_stale",description:"Drie verse opnames waren te langzaam voor bediening; er is niets verstuurd.",retryable:true)
+        throw PreDispatchRejection(code:"observation_stale",description:exhausted+" Er is niets verstuurd.",retryable:true)
     }
-    throw BridgeError("Drie verse opnames waren te langzaam voor de 750 ms bedieningsgrens.")
+    throw BridgeError(exhausted)
 }
 
 func requireAligned(_ observation: Observation, recoverablePreDispatch: Bool = false) throws {
@@ -554,7 +594,7 @@ func validateMixDispatch(_ request: [String:Any], observation: Observation) thro
         }
     }
     guard now >= observation.sampledAt, now-observation.sampledAt <= 750_000_000 else {
-        throw PreDispatchRejection(code:"observation_stale",description:"Waarneming is te oud voor bediening; er is niets verstuurd.",retryable:true)
+        throw PreDispatchRejection(code:"observation_stale",description:"Waarneming is te oud voor de volgende bediening.",retryable:true)
     }
     if let supplied = request["expectedTracks"] {
         guard let titles = supplied as? [String:String], Set(titles.keys) == Set(["1","2"]),
@@ -590,8 +630,6 @@ func scrollBrowser(_ observation: Observation, pixels: Int32, preDispatch: (() t
     try preDispatch?()
     markNativeInputSent()
     move.post(tap:.cghidEventTap)
-    // Do not depend on asynchronous mouseMoved updating the global cursor before
-    // the wheel is constructed; otherwise the last EQ knob can receive it.
     wheel.post(tap:.cghidEventTap)
     try await Task.sleep(nanoseconds:100_000_000)
 }
@@ -610,6 +648,7 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
     case "djReady":
         try await DJSessionHost.shared.authorize(interactive:false)
         return ["credentialAvailable":true]
+    case "djCredentialStatus": return DJSessionHost.shared.credentialReadiness
     case "djAuthorize":
         try await DJSessionHost.shared.authorize(interactive:true)
         return ["credentialAvailable":true]
@@ -633,6 +672,7 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
             try NSBitmapImageRep(cgImage:observation.image).representation(using:.png,properties:[:])?.write(to:output)
         }
         return observation.json
+    case "refreshLibrary": return try await refreshLibraryExport(request)
     case "browse":
         let before = try await checkedObservation()
         guard before.text(in:CGRect(x:235,y:429,width:450,height:24)) == "26" else {
@@ -822,6 +862,8 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
                 "combinedMS":Double(DispatchTime.now().uptimeNanoseconds-started)/1e6,
                 "note":"Small sequential local gestures on one pointer, not simultaneous events. EQ dB and audio loudness are not measured.",
                 "after":after.json]
+    case "echoAccent":
+        return try await performEchoAccent(request)
     case "mixGesture":
         return try await performMixGesture(request)
     case "closeStoppedDeck":
@@ -926,7 +968,7 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
         let x = deck == 1 ? 613.0 : 659.0
         try await pointer(CGPoint(x:x,y:y),observation:before,dragTo:CGPoint(x:x,y:y+pixels),
                           preDispatch:{try requireLiveControlRequest(request)})
-        return ["dispatched":true,"verified":false,"after":try await observe(mixerOnly:true).json]
+        return ["dispatched":true,"commandsSent":true,"verified":false,"after":try await observe(mixerOnly:true).json]
     case "crossfader":
         guard let value = request["value"] as? Double, value.isFinite, (0...1).contains(value) else {
             throw BridgeError("Crossfader vereist value tussen 0 en 1.")
@@ -963,6 +1005,13 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
                 "after": after.json]
     default: throw BridgeError("Onbekend commando.")
     }
+}
+
+func configureBrokenPipeHandling() {
+    // Clients may time out while capture or Keychain work is still completing.
+    // A closed socket/child pipe must return EPIPE, not terminate the host (13).
+    // Keep the existing write-error handling and per-socket protection as well.
+    signal(SIGPIPE, SIG_IGN)
 }
 
 func runServer() {
@@ -1039,6 +1088,7 @@ func runServer() {
 #if !NATIVE_TRANSPORT_TESTS
 @main enum BridgeMain {
 static func main() throws {
+configureBrokenPipeHandling()
 if CommandLine.arguments.contains("--diagnose") {
     let data = try JSONSerialization.data(withJSONObject: status(), options: [.prettyPrinted,.sortedKeys])
     print(String(decoding: data, as: UTF8.self))

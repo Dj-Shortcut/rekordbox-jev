@@ -10,6 +10,7 @@ import time
 
 from .events import emit
 from .state import ENDPOINT_TOLERANCE, number
+from .recovery import MixReadbackIncomplete, mixer_state
 
 
 class Runner:
@@ -41,6 +42,8 @@ class Runner:
         self._last_observe_start = self._last_request_start = float('-inf')
         self._api_context = None
         self._actuator_context = None
+        self._recovery = None
+        self._mix_recovery_count = 0
 
     def request_stop(self):
         self.stopping = True
@@ -117,7 +120,7 @@ class Runner:
         decision=context['decision'];control=decision.get('transport')
         if control!='hold':
             self.meaningful_actions.append({k:deepcopy(decision[k]) for k in
-                ('transport','track_id','crossfader','bass','duration_beats','expected_titles') if k in decision})
+                ('transport','track_id','crossfader','bass','mid','high','duration_beats','expected_titles') if k in decision})
             self.meaningful_actions=self.meaningful_actions[-12:]
         if str(control).startswith('load_') and isinstance(decision.get('track_id'),str):
             self.recent_tracks=(self.recent_tracks+[decision['track_id']])[-12:]
@@ -141,7 +144,7 @@ class Runner:
         if self.transition and self._identities(after)==self.transition['identities'] and control!='hold':
             self.transition['last_verified_action']=control
             if control=='mix':
-                self.transition['last_verified_mix']={k:decision.get(k) for k in ('crossfader','bass','duration_beats')}
+                self.transition['last_verified_mix']={k:decision.get(k) for k in ('crossfader','bass','mid','high','duration_beats')}
                 # Count actual audible overlap, never the earlier muted start.
                 # Conservatively start at the verified after-frame, not dispatch;
                 # a closed route, pause, seek or alignment invalidates old timing.
@@ -172,6 +175,30 @@ class Runner:
             self._invalidate_transition(snapshot)
             self._latest_observation_start = started
             self.emit('snapshot', snapshot=self.latest, valid=self.valid(snapshot), seconds=self.clock()-started)
+            if self._recovery is not None and started >= self._last_actuation_end:
+                recovery = self._recovery
+                positions = mixer_state(snapshot, recovery['titles'])
+                same_tracks = self._identities(snapshot) == recovery['identities']
+                if positions is None or not same_tracks:
+                    self._recovery = None
+                    self.blocked = True
+                    self.emit('error', stage='recovery', reason='mixer_state_not_confirmed',
+                              message='Herstel gestopt: tracks, uitlijning of mixerstand niet bevestigd.')
+                else:
+                    previous = recovery['positions']
+                    stable = previous is not None and all(abs(a-b) <= .025 for a,b in zip(previous, positions))
+                    recovery['positions'] = positions
+                    recovery['reads'] += 1
+                    if stable:
+                        self._recovery = None
+                        self.emit('execution_reconciled', request_id=recovery['request_id'],
+                                  message='Mixerstand opnieuw bevestigd; Jev kiest vanaf deze stand.',
+                                  partial=True, verified=False)
+                    elif recovery['reads'] >= 6:
+                        self._recovery = None
+                        self.blocked = True
+                        self.emit('error', stage='recovery', reason='mixer_not_stable',
+                                  message='Mixerstand blijft veranderen; bediening onderbroken.')
         except asyncio.CancelledError:
             pass
         except Exception as error:
@@ -195,6 +222,8 @@ class Runner:
             self._remember_verified(context,result)
             self.verified_decisions += 1
             self.verified_actions += result.get('dispatched') is True
+            if context['decision'].get('transport') == 'mix' and result.get('dispatched') is True:
+                self._mix_recovery_count = 0
             self.history = self.history[-30:]
             # env's after-snapshot is evidence; dispatch still waits for an
             # independent observation begun after this actuation finished.
@@ -203,6 +232,18 @@ class Runner:
         except asyncio.CancelledError:
             pass
         except Exception as error:
+            if (type(error) is MixReadbackIncomplete and context['decision'].get('transport') == 'mix'
+                    and self._mix_recovery_count < 2
+                    and self._identities(error.snapshot) == self._identities(context['before_snapshot'])
+                    and mixer_state(error.snapshot, context['decision']['expected_titles']) is not None):
+                self._mix_recovery_count += 1
+                self._recovery = {'titles':context['decision']['expected_titles'],
+                    'identities':self._identities(error.snapshot), 'positions':None, 'reads':0,
+                    'request_id':context['request_id'], 'deadline':self.clock()+4}
+                self.emit('execution_reconciling', request_id=context['request_id'],
+                          message=str(error), reasons=error.reasons, partial=True, verified=False,
+                          attempt=self._mix_recovery_count)
+                return
             if self.explicitly_rejected_before_input(error):
                 # No input occurred. Discard this answer; the actuation epoch
                 # and completion barrier above require a later observation and
@@ -226,7 +267,7 @@ class Runner:
             response = task.result()
             self.emit('answer', request_id=context['id'], request=context['request'], response=response,
                       seconds=self.clock()-context['started'])
-            if self.stopping or self.blocked or self.busy or context['busy'] or context['epoch'] != self._epoch:
+            if self.stopping or self.blocked or self._recovery is not None or self.busy or context['busy'] or context['epoch'] != self._epoch:
                 self.emit('ignored', request_id=context['id'], reason='busy_stopped_or_changed_execution')
                 return
             if not self.valid(self.latest) or self._latest_observation_start < self._last_actuation_end:
@@ -261,11 +302,16 @@ class Runner:
                 if self._api_task is not None and self._api_task.done():
                     self._api_done()
                 now = self.clock()
+                if self._recovery is not None and now >= self._recovery['deadline']:
+                    self._recovery = None
+                    self.blocked = True
+                    self.emit('error', stage='recovery', reason='mixer_readback_timeout',
+                              message='Mixer niet tijdig opnieuw leesbaar; bediening onderbroken.')
                 if self._observe_task is None and now-self._last_observe_start >= self.observe_interval:
                     self._last_observe_start = now
                     self._observe_task = asyncio.create_task(self._observe())
                 fresh_after_action = self.busy or self._latest_observation_start >= self._last_actuation_end
-                if (not self.blocked and self._api_task is None and self.valid(self.latest)
+                if (not self.blocked and self._recovery is None and self._api_task is None and self.valid(self.latest)
                         and fresh_after_action and self.sequence != self._last_request_snapshot
                         and now-self._last_request_start >= self.decision_interval):
                     try:

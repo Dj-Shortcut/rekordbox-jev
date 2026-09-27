@@ -11,12 +11,15 @@ from . import policy
 from .environment import Rekordbox, BRIDGE
 from .jev_client import JevClient
 from .runner import Runner
+from .startup import prepare_library
+from .audio_timeline import TimelineStore
 
 ROOT=Path(__file__).resolve().parents[1]
 DISPLAY=Path(f'/private/tmp/rekordbox-bridge-{os.getuid()}/widget/evidence')
 LABELS={'hold':'Muziek laten lopen','mix':'Overgang voortzetten','load_A':'Nummer laden op A','load_B':'Nummer laden op B',
     'play_A':'Deck A starten','play_B':'Deck B starten','prepare_A':'Deck A voorbereiden',
     'prepare_B':'Deck B voorbereiden','align_A':'Deck A opnieuw inzetten','align_B':'Deck B opnieuw inzetten',
+    'echo_A':'Kort echo-accent op A', 'echo_B':'Kort echo-accent op B',
     'stop_A':'Deck A stoppen','stop_B':'Deck B stoppen','reset_A':'EQ A neutraal','reset_B':'EQ B neutraal'}
 
 
@@ -55,7 +58,8 @@ class Display:
         if name=='snapshot':
             if event.get('valid') is False and not self.blocked:
                 self.status('Rekordbox opnieuw uitlezen · '+str(event['snapshot'].get('error','onbekende toestand')))
-            event['snapshot']={k:v for k,v in event['snapshot'].items() if k!='library'}
+            # Requests already record the exact compact audio evidence Jev saw.
+            event['snapshot']={k:v for k,v in event['snapshot'].items() if k not in ('library','audio_windows')}
         with (self.directory/'events.jsonl').open('a') as file:
             file.write(json.dumps(event,ensure_ascii=False,allow_nan=False)+'\n')
         if name=='started':self.status('DJ Jev · Rekordbox uitlezen')
@@ -73,15 +77,32 @@ class Display:
                 record.update(status='answered',finished_at=time.time(),
                     result={**event['response'],'payload_id':record['request']['payload_id']})
                 atomic(DISPLAY/'jev-events'/(record['id']+'.json'),record)
+        if name in ('dispatch','verified','ignored','execution_deferred','execution_reconciling','execution_reconciled','error'):
+            record=self.requests.get(event.get('request_id'))
+            if record:
+                # Keep execution evidence attached to its own request; the
+                # global session banner may already describe a newer decision.
+                record['execution']={'status':name,'updated_at':time.time(),
+                    **{key:event[key] for key in ('decision','reason','message','code','commands_sent','dispatched')
+                       if key in event}}
+                if name=='verified':
+                    result=event.get('result',{})
+                    record['execution'].update(verified=result.get('verified') is True,
+                        dispatched=result.get('dispatched') is True)
+                atomic(DISPLAY/'jev-events'/(record['id']+'.json'),record)
         if name in ('dispatch','verified'):
             d=event['decision']; labels=[]
             if d.get('transport')!='hold':labels.append(LABELS.get(d['transport'],d['transport']))
             if d.get('crossfader')!='hold':labels.append('Fader naar '+d['crossfader'])
             if d.get('bass')!='hold':labels.append('Bass naar '+d['bass'])
+            for band, label in (('mid','Midden'),('high','Hoog')):
+                if d.get(band,'hold')!='hold':labels.append(label+' aanpassen')
             action=' · '.join(labels) or 'Muziek laten lopen'
             self.status(('Uitvoeren · ' if name=='dispatch' else 'Bevestigd · ')+action)
         if name=='execution_deferred':
             self.status('Opnieuw uitlezen · niets verstuurd · '+str(event.get('message','waarneming gewijzigd')))
+        if name in ('execution_reconciling','execution_reconciled'):
+            self.status(str(event['message']))
         if name=='error':
             self.blocked = self.blocked or event.get('blocked') is True
             self.error=event.get('error') or event.get('message') or event.get('reason') or event.get('error_type')
@@ -91,13 +112,31 @@ class Display:
 
 
 async def session(key):
-    display=Display(key);env=Rekordbox(native_trace=display);client=JevClient(key)
+    display=Display(key);env=Rekordbox(library=[],native_trace=display);client=JevClient(key)
     runner=Runner(env,policy,client,display)
     loop=asyncio.get_running_loop()
     for sig in (signal.SIGINT,signal.SIGTERM):loop.add_signal_handler(sig,runner.request_stop)
     try:
         await env.start()
-        result=await runner.run()
+        preparation=asyncio.create_task(prepare_library(env.native,display,root=ROOT,bridge=BRIDGE))
+        stopped=asyncio.create_task(runner._stop_event.wait())
+        try:
+            await asyncio.wait((preparation,stopped),return_when=asyncio.FIRST_COMPLETED)
+            if runner.stopping:
+                await env.stop()
+                preparation.cancel()
+                await asyncio.gather(preparation,return_exceptions=True)
+                await client.close()
+                result={'stopped':True,'blocked':False}
+                display({'event':'stopped'})
+            else:
+                env.library=await preparation
+                env.audio_store=await asyncio.to_thread(TimelineStore,env.library)
+                result=await runner.run()
+        finally:
+            stopped.cancel()
+            if not preparation.done():preparation.cancel()
+            await asyncio.gather(preparation,stopped,return_exceptions=True)
     except Exception as error:
         display({'event':'error','stage':'startup','blocked':True,'error':str(error)})
         await env.stop();await client.close()

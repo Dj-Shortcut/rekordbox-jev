@@ -102,6 +102,18 @@ class PolicyTests(unittest.TestCase):
         request=policy.prepare(snapshot(frame),[],False)
         self.assertIn('play_B',request['questions']['transport']['criteria'])
 
+    def test_live_clock_zero_glyph_is_read_only_inside_clock_decimal(self):
+        for zero in ('o','O','о','О'):
+            frame=loaded(raw());frame['decks'][0]['metadata']=f'Artist 124.00 Am -05:07.3 00:00.{zero}|'
+            observed=snapshot(frame)['decks']['A']
+            self.assertEqual(observed['elapsed'],0.)
+            self.assertEqual(observed['remaining'],307.3)
+        for suffix in ('x','oo','5x'):
+            frame=loaded(raw());frame['decks'][0]['metadata']=f'Artist 124.00 Am -05:07.3 00:00.{suffix}|'
+            self.assertIsNone(snapshot(frame)['decks']['A']['elapsed'])
+        frame=loaded(raw());frame['decks'][0]['metadata']='Artist 124.00 Am -05:07.3 00:00.о 00:00.0'
+        self.assertIsNone(snapshot(frame)['decks']['A']['elapsed'])
+
     def test_nonzero_remaining_time_does_not_authorize_stopping_sole_audible_deck(self):
         frame=loaded(raw(),playing=True)
         frame['decks'][0]['metadata']='Artist 124.00 Am -00:00.2 05:07.1'
@@ -144,7 +156,7 @@ class PolicyTests(unittest.TestCase):
         frame=loaded(loaded(raw(),playing=True),'B',1,True)
         frame['mixer']['red_bar_aligned']=True
         s=snapshot(frame); request=policy.prepare(s,[],False)
-        self.assertEqual(set(request['questions']),{'transport','crossfader','bass','duration'})
+        self.assertEqual(set(request['questions']),{'transport','crossfader','bass','mid','high','duration'})
         decision=policy.resolve(request,response(request,transport='mix',crossfader='B',bass='B',duration='beats8'))
         self.assertEqual(decision['transport'],'mix')
         self.assertEqual((decision['crossfader'],decision['bass'],decision['duration_beats']),('B','B',8))
@@ -169,7 +181,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(context['trailing_hold_decisions_in_retained_history'],30)
             self.assertEqual(request['state']['routes']['B'],{'muted':True,'playing_through_open_route':False,'ended':False})
             question=request['questions']['transport'];menus.append(set(question['criteria']))
-            self.assertEqual(menus[-1],{'hold','load_B','reset_B','play_B'})
+            self.assertEqual(menus[-1],{'hold','play_B'})
             self.assertNotIn('Mixer questions are available now',question['instructions'])
             self.assertNotIn('If mixing now, choose HOLD',question['instructions'])
             self.assertIn('seconds',request['state']['time_units'])
@@ -357,15 +369,20 @@ class PolicyTests(unittest.TestCase):
             chosen=policy.resolve(request,response(request,transport='reset_B'))
             self.assertEqual(chosen['transport'],'reset_B')
             self.assertTrue(policy.applicable(chosen,s,history))
-            # The prompt supplies the rule; code does not force the reset choice.
-            chosen=policy.resolve(request,response(request,transport='hold'))
-            self.assertEqual(chosen['transport'],'hold')
+            if outgoing_playing:
+                # A completed handoff must clean up before idle or another mix.
+                self.assertEqual(set(request['questions']['transport']['criteria']),{'reset_B'})
+            else:
+                # Once the old deck is free, finish preparation before waiting.
+                self.assertTrue(request['state']['preparation']['required_now'])
+                self.assertNotIn('hold',request['questions']['transport']['criteria'])
         s['decks']['B']['eq_neutral']['low']=True;s['decks']['B']['bass']=0.
         request=policy.prepare(s,history,False)
         self.assertTrue(request['state']['transition']['incoming_eq_neutral'])
         self.assertEqual(request['state']['continuity']['audible_non_neutral_bands'],{'B':[]})
         self.assertNotIn('reset_B',request['questions']['transport']['criteria'])
-        self.assertIn('hold',request['questions']['transport']['criteria'])
+        self.assertEqual(set(request['questions']['transport']['criteria']),{'hold'})
+        self.assertEqual(request['state']['preparation']['status'],'unavailable')
 
     def test_busy_has_no_irrelevant_track_or_mix_duration_question(self):
         request=policy.prepare(snapshot(),[],True)

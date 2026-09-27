@@ -10,6 +10,9 @@ from pathlib import Path
 import time
 from .state import normalize, read_library, number, closed, cross_closed, ENDPOINT_TOLERANCE
 from .events import emit, native_parameters, native_result_summary, snapshot_summary
+from .audio_timeline import TimelineStore
+from .eq import BASS_TARGETS, TONE_TARGETS, position, readable
+from .recovery import MixReadbackIncomplete, reconcileable_mix, mixer_state
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT.parent if (ROOT.parent/'Sources/Bridge.swift').is_file() else ROOT.parent/'rekordbox-bridge'
@@ -67,7 +70,7 @@ class Native:
         try:
             writer.write(json.dumps({'command': command, 'clientPID': os.getpid(), **parameters}, allow_nan=False).encode()+b'\n')
             await writer.drain()
-            line = await asyncio.wait_for(reader.readline(), 60 if command == 'loadChosenTrack' else 25)
+            line = await asyncio.wait_for(reader.readline(), 90 if command == 'refreshLibrary' else 60 if command == 'loadChosenTrack' else 25)
             reply = json.loads(line)
             return native_result(reply)
         finally:
@@ -113,11 +116,17 @@ class Native:
 
 
 class Rekordbox:
-    def __init__(self, native=None, library=None, native_trace=None):
+    def __init__(self, native=None, library=None, native_trace=None, audio_store=None, *, effects_enabled=False):
         self.native = native or Native()
         self.library = library if library is not None else read_library()
+        # Cache validation/preload happens before Runner starts. Snapshot lookup
+        # is bounded in-memory work, with no Essentia import or file access.
+        self.audio_store = audio_store if audio_store is not None else TimelineStore(self.library)
         self.version = 0
         self.stopping = False
+        # Effects are paused at the user's request; hardware capability is not authorization.
+        self.effects_enabled = effects_enabled is True
+        self.last_effect_ns = None
         self.native_trace = native_trace
         self.command_sequence = 0
 
@@ -126,7 +135,20 @@ class Rekordbox:
 
     def snapshot(self, raw):
         self.version += 1
-        return normalize(raw, self.library, self.version)
+        snapshot = normalize(raw, self.library, self.version)
+        try:
+            context = self.audio_store.snapshot_context(snapshot)
+            if context:
+                snapshot['audio_windows'] = context
+        except Exception:
+            # Optional musical evidence cannot invalidate physical state or
+            # authorize an action. Missing analysis retains the old behavior.
+            pass
+        if snapshot.get('valid'):
+            snapshot['effects']['subtle_echo_supported'] &= self.effects_enabled
+            snapshot['effects']['cooldown_seconds'] = (max(0.,45-(time.monotonic_ns()-self.last_effect_ns)/1e9)
+                if self.last_effect_ns else 0.)
+        return snapshot
 
     async def observe(self):
         return self.snapshot(await self.native.call('observer', 'observe', fast=True))
@@ -245,8 +267,20 @@ class Rekordbox:
             # This primitive verifies the whole gesture, including both
             # transports and red-marker alignment in its after-frame.
             if name == 'mixGesture' and result.get('verified') is not True:
+                if reconcileable_mix(result, state, titles):
+                    raise MixReadbackIncomplete(state, result['verification']['reasons'])
                 raise RuntimeError('De volledige mixbeweging is niet bevestigd; niet herhaald.')
             return result
+
+        def check_completion_margin():
+            outgoing=decision.get('completion_outgoing')
+            if outgoing not in ('A','B') or not number(state['decks'][outgoing]['remaining'],0,30):
+                return
+            if not control_attempted:
+                reject_state('Afronden heeft nu voorrang op verdere EQ-beweging.', 'completion_margin_reached')
+            if mixer_state(state,titles) is not None:
+                raise MixReadbackIncomplete(state,['completion_margin_reached'])
+            raise RuntimeError('Afrondtijd bereikt maar mixer niet opnieuw leesbaar.')
 
         async def reset(d, bands=None):
             bands=['low','mid','high','trim'] if bands is None else bands
@@ -260,7 +294,7 @@ class Rekordbox:
                 raise RuntimeError('Afspeelstand is niet bevestigd.')
 
         control=decision.get('transport','hold')
-        if control!='mix' and any(decision.get(k,'hold')!='hold' for k in ('crossfader','bass')):
+        if control!='mix' and any(decision.get(k,'hold')!='hold' for k in ('crossfader','bass','mid','high')):
             raise ValueError('Mixerdoelen zijn alleen geldig voor de gekozen MIX-tak.')
         if control not in ('hold','mix'):
             kind,d=control.rsplit('_',1)
@@ -292,6 +326,10 @@ class Rekordbox:
                             or state['decks'][d]['playing'] is not False
                             or state['decks'][other]['playing'] is not True):
                         raise RuntimeError('Stilstaand deck niet bevestigd gesloten.')
+                if number(state['decks'][d].get('remaining'), 0, .5):
+                    # An ended track is closed only to make room for a replacement.
+                    # Do not sync or EQ it: it cannot be launched as a successor.
+                    return {'verified':True,'dispatched':dispatched,'snapshot':state}
                 bands=[b for b in ('trim','high','mid') if state['decks'][d]['eq_neutral'].get(b) is False]
                 if bands:
                     await reset(d,bands)
@@ -356,6 +394,19 @@ class Rekordbox:
                                 or abs(state['mixer']['cross']-endpoint)>ENDPOINT_TOLERANCE):
                             raise RuntimeError('Openingsroute niet bevestigd terwijl beide decks gestopt zijn; niet gestart.')
                     await transport(d,True)
+            elif kind=='echo':
+                state=await fresh()
+                deck=state['decks'][d]
+                if (not state.get('effects',{}).get('subtle_echo_supported')
+                        or state['effects'].get('cooldown_seconds',45)>0
+                        or deck['playing'] is not True or closed(state,d)
+                        or any(not number(x['remaining'],20.001) for x in state['decks'].values() if x['playing'])
+                        or not number(deck['remaining'],20.001) or not number(deck['bpm'],60,200)):
+                    reject_state('Geen ruimte voor een subtiel effect op dit deck.')
+                result=await command('echoAccent',deck=n,bpm=deck['bpm'])
+                if result.get('verified') is not True or result.get('effectOffVerified') is not True:
+                    raise RuntimeError('Echo of automatisch uitschakelen niet bevestigd.')
+                self.last_effect_ns=time.monotonic_ns()
             elif kind=='stop':
                 state=await fresh()
                 remaining=state['decks'][d]['remaining']
@@ -372,7 +423,7 @@ class Rekordbox:
                 raise ValueError('Onbekende transportkeuze.')
 
         cross=decision.get('crossfader','hold'); bass=decision.get('bass','hold')
-        if cross!='hold' or bass!='hold':
+        if any(decision.get(k,'hold')!='hold' for k in ('crossfader','bass','mid','high')):
             state=await fresh()
             if not state['mixer']['aligned'] or not all(state['decks'][d]['playing'] for d in ('A','B')):
                 reject_state('Beats niet gelijk; geen mixbeweging.', 'alignment_not_confirmed')
@@ -381,9 +432,10 @@ class Rekordbox:
                 reject_state('BPM of kanaalstand niet bevestigd; geen mixbeweging.')
             seconds=decision.get('duration_beats',4)*60/state['decks']['A']['bpm']
             target={'A':0.,'center':.5,'B':1.}.get(cross)
-            goals={'A':{'A':0.,'B':-.6},'B':{'A':-.6,'B':0.},'balanced':{'A':-.3,'B':-.3}}.get(bass)
+            goals=BASS_TARGETS.get(bass)
             if goals:
                 for _ in range(20):
+                    check_completion_margin()
                     if not state['mixer']['aligned'] or not all(state['decks'][d]['playing'] for d in ('A','B')):
                         reject_state('Uitlijning verloren; geen volgende mixbeweging.', 'alignment_not_confirmed')
                     if any(state['decks'][d]['bass'] is None for d in ('A','B')):
@@ -407,18 +459,57 @@ class Rekordbox:
                             raise RuntimeError('Gekoppelde bassbeweging niet bevestigd.')
                     else:
                         d=(lower or higher)[0];before=state['decks'][d]['bass']
-                        await command('eq',deck=1 if d=='A' else 2,band='low',pixels=4. if lower else -4.)
-                        await confirm(lambda s: number(s['decks'][d]['bass'])
-                            and (before-s['decks'][d]['bass'] if lower else s['decks'][d]['bass']-before)>=.01,
-                            'Bassknop reageert niet bevestigd.')
+                        result=await command('eq',deck=1 if d=='A' else 2,band='low',pixels=4. if lower else -4.)
+                        try:
+                            await confirm(lambda s: number(s['decks'][d]['bass'])
+                                and (before-s['decks'][d]['bass'] if lower else s['decks'][d]['bass']-before)>=.01,
+                                'Bassknop reageert niet bevestigd.')
+                        except RuntimeError:
+                            # Only a completed native stroke with a fully readable
+                            # mixer can be reconciled. Never retry this relative input.
+                            if (result.get('dispatched') is True and result.get('commandsSent') is True
+                                    and mixer_state(state,titles) is not None):
+                                raise MixReadbackIncomplete(state,['bass_direction_not_confirmed'])
+                            raise
                 else:raise RuntimeError('Bassdoel niet bereikt binnen de begrensde beweging.')
                 for d in ('A','B'):
-                    if goals[d]==0:
+                    if goals[d]==0 and state['decks'][d]['eq_neutral']['low'] is not True:
                         result=await command('eqReset',deck=1 if d=='A' else 2,bands=['low'])
                         if result.get('verified') is not True or state['decks'][d]['eq_neutral']['low'] is not True:
                             raise RuntimeError('Neutrale bass niet bevestigd.')
                 if any(state['decks'][d]['bass'] is None or abs(state['decks'][d]['bass']-goals[d])>.1 for d in ('A','B')):
                     raise RuntimeError('Bassdoel niet bevestigd.')
+            for band in ('mid', 'high'):
+                tone = TONE_TARGETS.get(decision.get(band, 'hold'))
+                if not tone:
+                    continue
+                for d, goal in tone.items():
+                    for step in range(12):
+                        state = await fresh()
+                        check_completion_margin()
+                        if (state['mixer']['aligned'] is not True
+                                or not all(deck['playing'] for deck in state['decks'].values())
+                                or not readable(state['decks'], band)):
+                            reject_state('EQ-toestand of uitlijning niet bevestigd.')
+                        before = position(state['decks'][d], band)
+                        if abs(before-goal) <= .07 and (goal != 0 or state['decks'][d]['eq_neutral'][band] is True):
+                            break
+                        if goal == 0 and before >= -.09:
+                            await reset(d, [band])
+                        else:
+                            await command('eq', deck=1 if d=='A' else 2, band=band,
+                                          pixels=4. if before>goal else -4.)
+                            await confirm(lambda s: number(position(s['decks'][d], band))
+                                and (before-position(s['decks'][d], band) if before>goal
+                                     else position(s['decks'][d], band)-before) >= .01,
+                                'EQ-beweging niet bevestigd.')
+                        # Spread small steps; native capture/control time also consumes the budget.
+                        if abs(position(state['decks'][d], band)-goal) > .07:
+                            await asyncio.sleep(min(.25, seconds/8))
+                    else:
+                        raise RuntimeError('EQ-doel niet bereikt binnen de begrensde beweging.')
+                    if abs(position(state['decks'][d], band)-goal) > .1:
+                        raise RuntimeError('EQ-doel niet bevestigd.')
             if target is not None:
                 result=await command('mixGesture',crossfader=target,durationSeconds=max(.25,min(12.,seconds)))
                 if result.get('crossfaderVerified') is not True or abs(state['mixer']['cross']-target)>.04:
@@ -430,4 +521,11 @@ class Rekordbox:
                 raise RuntimeError('Crossfaderdoel na de mixbeweging niet bevestigd.')
             if goals and any(state['decks'][d]['bass'] is None or abs(state['decks'][d]['bass']-goals[d])>.1 for d in ('A','B')):
                 raise RuntimeError('Bassdoel na de mixbeweging niet bevestigd.')
+            for band in ('mid', 'high'):
+                tone = TONE_TARGETS.get(decision.get(band, 'hold'))
+                if tone and any(not number(position(state['decks'][d], band))
+                        or abs(position(state['decks'][d], band)-goal)>.1
+                        or (goal == 0 and state['decks'][d]['eq_neutral'][band] is not True)
+                        for d, goal in tone.items()):
+                    raise RuntimeError('EQ-doel na de mixbeweging niet bevestigd.')
         return {'verified':True,'dispatched':dispatched,'snapshot':state}

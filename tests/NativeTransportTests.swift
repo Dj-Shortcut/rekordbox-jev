@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 @main struct NativeTransportTests {
     static var checks = 0
@@ -19,6 +20,102 @@ import AppKit
         do { _ = try MixGestureSpec(request); return false } catch { return true }
     }
     static func main() async throws {
+        check(observationHasInputBudget(sampledAt:0,now:600_000_000,reserveNS:150_000_000),
+              "EQ guard retains the full 150 ms input reserve at its boundary")
+        check(!observationHasInputBudget(sampledAt:0,now:600_000_001,reserveNS:150_000_000),
+              "A frame too close to expiry is recaptured before a physical stroke")
+        check(!observationHasInputBudget(sampledAt:2,now:1,reserveNS:0),"Future frames are never fresh")
+        check(!observationHasInputBudget(sampledAt:0,now:0,reserveNS:750_000_001),"Invalid reserve cannot underflow")
+        var pairClock: UInt64 = 550_000_000
+        var pairEvents: [String] = []
+        let refreshed = try await performFreshGuardedPair(UInt64(0),read:{ _ in
+            pairEvents.append("read"); return pairClock
+        },validate:{ stamp in
+            guard observationFresh(sampledAt:stamp,now:pairClock) else { throw BridgeError("fixture stale frame") }
+        },first:{ _ in
+            pairEvents.append("first"); pairClock += 210_000_000
+        },second:{ stamp in
+            check(stamp == pairClock,"Second knob receives the newly captured frame")
+            pairEvents.append("second")
+        })
+        check(refreshed == 760_000_000 && !observationFresh(sampledAt:0,now:pairClock),
+              "Reproduced old-frame expiry between paired EQ strokes without weakening freshness")
+        check(pairEvents == ["first","read","second"],"Exactly one capture separates exactly two EQ strokes")
+        for failure in ["tracks_changed","alignment_lost","read_failed","cancelled"] {
+            var firstCount = 0, secondCount = 0, reads = 0
+            do {
+                _ = try await performFreshGuardedPair("initial",read:{ _ in
+                    reads += 1
+                    if failure == "read_failed" { throw BridgeError("fixture failed capture") }
+                    if failure == "cancelled" { throw CancellationError() }
+                    return failure
+                },validate:{ frame in
+                    if frame != "initial" { throw BridgeError(frame) }
+                },first:{ _ in firstCount += 1 },second:{ _ in secondCount += 1 })
+                check(false,"Changed or cancelled second guard must reject")
+            } catch {
+                check(firstCount == 1 && reads == 1 && secondCount == 0,
+                      "Failed second guard never repeats first EQ stroke or sends second: \(failure)")
+            }
+        }
+        for travel in [-4.5,4.5,40.0,-40.0] {
+            let origin = CGPoint(x:659.2,y:283.1)
+            var previous = origin
+            var sum: Int64 = 0
+            for step in 1...12 {
+                let point = CGPoint(x:origin.x,y:origin.y+travel*Double(step)/12)
+                let delta = pointerDelta(from:previous,to:point)
+                check(delta.x == 0,"EQ travel never inherits horizontal motion from the previous knob")
+                check(travel > 0 ? delta.y >= 0 : delta.y <= 0,"EQ relative motion preserves direction")
+                sum += delta.y; previous = point
+            }
+            check(sum == Int64((origin.y+travel).rounded()-origin.y.rounded()),"Subpixel motion retains the requested total")
+        }
+        check(mixBassStroke(total:4,steps:2,step:1) == 0 && mixBassStroke(total:4,steps:2,step:2) == 4,
+              "The failed live 4px bass request remains one stroke despite two crossfader steps")
+        for total in [1.0,4.0,5.0,9.0,40.0] {
+            for steps in [1,2,8,24] {
+                let strokes = (1...steps).map { mixBassStroke(total:total,steps:steps,step:$0) }
+                check(abs(strokes.reduce(0,+)-total) < 0.000001,"Bass interpolation preserves the requested total")
+                check(strokes.filter{$0 > 0}.allSatisfy{$0 >= min(total,4)},"Fader timing never fragments a normal EQ stroke")
+            }
+        }
+        let expectedLoadTitles = ["1":"El Mariachi (Dirty Doering Remix)","2":"Eating Hooks (Deep Dish Remix)"]
+        let changedLoadTitles = ["1":"FADE AWAY","2":"Eating Hooks (Deep Dish Remix)"]
+        try requireLoadTrackTitles(actual:expectedLoadTitles,expected:expectedLoadTitles,inputSent:false)
+        do {
+            try requireLoadTrackTitles(actual:changedLoadTitles,expected:expectedLoadTitles,inputSent:false)
+            check(false,"Changed decks must reject the old load choice")
+        } catch let error as PreDispatchRejection {
+            check(error.code == "tracks_changed" && error.retryable,"No-input title change permits fresh observation and a new decision")
+        }
+        do {
+            try requireLoadTrackTitles(actual:changedLoadTitles,expected:expectedLoadTitles,inputSent:true)
+            check(false,"Changed decks after input must stop the load")
+        } catch {
+            check(!(error is PreDispatchRejection),"A partially dispatched load cannot claim safe retry")
+        }
+        do {
+            try requireLoadTrackTitles(actual:changedLoadTitles,expected:["1":"FADE AWAY"],inputSent:false)
+            check(false,"Incomplete expected titles must be rejected")
+        } catch {
+            check(!(error is PreDispatchRejection),"Malformed title guard is not an automatically recoverable race")
+        }
+        check(subtleEchoAllowed(deck:1,bpm:123,remaining:60,playing:true,elapsedSinceLast:45),"Subtle echo with time and cooldown")
+        check(!subtleEchoAllowed(deck:1,bpm:123,remaining:20,playing:true,elapsedSinceLast:45),"No echo at an urgent ending")
+        check(!subtleEchoAllowed(deck:1,bpm:123,remaining:60,playing:true,elapsedSinceLast:44),"No repeated echo accent")
+        check(!subtleEchoAllowed(deck:1,bpm:123,remaining:60,playing:false,elapsedSinceLast:45),"No echo on stopped music")
+        check(!subtleEchoAllowed(deck:3,bpm:123,remaining:60,playing:true,elapsedSinceLast:45),"Only supported decks")
+
+        configureBrokenPipeHandling()
+        var closedPipe: [Int32] = [0, 0]
+        check(pipe(&closedPipe) == 0,"Create a real disconnected-client fixture")
+        close(closedPipe[0])
+        var byte: UInt8 = 1
+        let written = write(closedPipe[1], &byte, 1)
+        let writeError = errno
+        close(closedPipe[1])
+        check(written == -1 && writeError == EPIPE,"A closed reader returns EPIPE without killing the host")
         let longTitle = "Could Heaven Ever Be Like This (Walker & Royce and Chris Lorenzo Remix) (Mixed)"
         let shownPrefix = "Could Heaven Ever Be Like This (Walker & Royce and"
         let longFile = "Idris Muhammad - \(longTitle).mp3"
@@ -604,6 +701,20 @@ import AppKit
                 colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!
             image.bitmapData!.initialize(repeating:0,count:image.bytesPerRow*image.pixelsHigh)
             return image
+        }
+        let routeBlue = NSColor(deviceRed:0.05,green:0.4,blue:0.8,alpha:1)
+        for mask in 0..<16 {
+            let frame = bitmap()
+            for (bit,x) in [531,709,553,730].enumerated() where mask & (1 << bit) != 0 {
+                frame.setColor(routeBlue,atX:x,y:379)
+            }
+            let routes = MixerVision(bitmap:frame).deckAssignments
+            for deck in 1...2 {
+                let left = mask & (1 << ((deck-1)*2)) != 0
+                let right = mask & (1 << ((deck-1)*2+1)) != 0
+                let expected = left && !right ? "left" : right && !left ? "right" : !left && !right ? "unassigned" : "unknown"
+                check(routes[String(deck)] == expected,"Staging retains all assignment states without full mixer analysis")
+            }
         }
         let white = NSColor(deviceRed:1,green:1,blue:1,alpha:1)
         let baseline = bitmap()

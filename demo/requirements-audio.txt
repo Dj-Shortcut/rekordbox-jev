@@ -1,0 +1,3 @@
+# Optional OFFLINE extractor only; the live DJ does not import these packages.
+# A native macOS arm64 wheel is available for Python 3.14 / macOS 15+.
+essentia==2.1b6.dev1438

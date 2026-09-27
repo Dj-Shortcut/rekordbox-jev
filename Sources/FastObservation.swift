@@ -139,6 +139,28 @@ func observationFresh(sampledAt: UInt64, now: UInt64) -> Bool {
     now >= sampledAt && now-sampledAt <= 750_000_000
 }
 
+func observationHasInputBudget(sampledAt: UInt64, now: UInt64, reserveNS: UInt64) -> Bool {
+    reserveNS <= 750_000_000 && now >= sampledAt && now-sampledAt <= 750_000_000-reserveNS
+}
+
+// Two relative EQ changes need two independent guards. The first stroke is
+// never retried when the fresh second guard fails or cancellation arrives.
+func performFreshGuardedPair<Frame>(_ initial: Frame,
+    read: (Frame) async throws -> Frame,
+    validate: (Frame) throws -> Void,
+    first: (Frame) async throws -> Void,
+    second: (Frame) async throws -> Void) async throws -> Frame {
+    try Task.checkCancellation()
+    try validate(initial)
+    try await first(initial)
+    try Task.checkCancellation()
+    let fresh = try await read(initial)
+    try Task.checkCancellation()
+    try validate(fresh)
+    try await second(fresh)
+    return fresh
+}
+
 let guardIdentityRegions = [CGRect(x:35,y:25,width:320,height:25),
     CGRect(x:45,y:174,width:430,height:20),CGRect(x:731,y:174,width:430,height:20)]
 
@@ -185,7 +207,7 @@ final class ObservationTextCache {
     }
 }
 
-let observationHeaderRegion = CGRect(x:35,y:25,width:320,height:25)
+let observationHeaderRegion = CGRect(x:35,y:25,width:270,height:25)
 
 func recognizedLayoutHeader(_ tokens: [TextToken]) -> Bool {
     func text(_ rect: CGRect) -> String {
@@ -361,7 +383,7 @@ func closeStoppedDeck(_ request: [String:Any]) async throws -> [String:Any] {
         guard stoppedDeckCloseAllowed(deck:spec.deck,targetPlaying:frame.playing(deck:spec.deck),
             otherPlaying:frame.playing(deck:spec.playingDeck),playingChannel:frame.fader(deck:spec.playingDeck),
             crossfader:vision.crossfader,
-            normalAssignments:frame.mixerJSON["deck_assignments"] as? [String:String] == ["1":"left","2":"right"]) else {
+            normalAssignments:frame.deckAssignments == ["1":"left","2":"right"]) else {
             throw BridgeError("Sluiten vereist een bevestigd gestopt doeldeck en een spelend ander deck met open kanaal; niets verstuurd.")
         }
     }
@@ -379,7 +401,7 @@ func closeStoppedDeck(_ request: [String:Any]) async throws -> [String:Any] {
         try await pointer(CGPoint(x:585+101*spec.endpoint,y:385),observation:before,
                           preDispatch:{try check(before)})
     },read:{try await observe(mixerOnly:true)},assess:{frame in
-        let assignments = frame.mixerJSON["deck_assignments"] as? [String:String]
+        let assignments = Optional(frame.deckAssignments)
         let facts = StoppedDeckCloseFacts(calibrated:frame.calibrated,
             titles:["1":deckTitle(frame,1),"2":deckTitle(frame,2)],
             targetPlaying:frame.playing(deck:spec.deck),otherPlaying:frame.playing(deck:spec.playingDeck),
@@ -438,7 +460,7 @@ func openSilentDeck(_ request: [String:Any]) async throws -> [String:Any] {
     let expected = request["expectedTracks"] as! [String:String]
     let started = DispatchTime.now().uptimeNanoseconds
     func facts(_ frame: Observation) -> SilentDeckOpenFacts {
-        let assignments = frame.mixerJSON["deck_assignments"] as? [String:String]
+        let assignments = Optional(frame.deckAssignments)
         var playing: [String:Bool] = [:]
         for deck in 1...2 { playing[String(deck)] = frame.playing(deck:deck) }
         return SilentDeckOpenFacts(calibrated:frame.calibrated,
@@ -537,6 +559,16 @@ struct MixGestureReadbackFacts {
     let incomingBass: Double?
 }
 
+// Crossfader interpolation must not subdivide a small EQ gesture below the
+// control's drag threshold. Schedule independent, bounded bass strokes.
+func mixBassStroke(total: Double, steps: Int, step: Int) -> Double {
+    guard total > 0, steps > 0, step > 0, step <= steps else { return 0 }
+    let strokes = min(steps, max(1, Int(ceil(total / 5))))
+    let completed = step * strokes / steps
+    let previous = (step - 1) * strokes / steps
+    return completed > previous ? total / Double(strokes) : 0
+}
+
 struct MixGestureAssessment {
     let readback: ReadbackAssessment
     let crossVerified: Bool
@@ -592,15 +624,19 @@ func performMixGesture(_ request: [String:Any]) async throws -> [String:Any] {
             throw BridgeError("Deadline verstreken; lokale beweging afgebroken.")
         }
     }
+    var validatedFrameStamp: UInt64?
     func guardFrame(_ frame: Observation) throws {
         try live()
         try validateMixDispatch(request,observation:frame)
+        if validatedFrameStamp == frame.sampledAt { return }
         try requireAligned(frame,recoverablePreDispatch:!dispatched)
         guard frame.playing(deck:1) == true, frame.playing(deck:2) == true else {
             throw BridgeError("Beide decks moeten blijven spelen tijdens een mixbeweging.")
         }
+        validatedFrameStamp = frame.sampledAt
     }
-    let first = try await checkedObservation(recoverablePreDispatch:true,mixerOnly:true)
+    let first = try await checkedObservation(recoverablePreDispatch:true,mixerOnly:true,
+                                            inputReserveNS:150_000_000)
     try guardFrame(first)
     let firstVision = MixerVision(bitmap:NSBitmapImageRep(cgImage:first.image))
     let startCross = firstVision.crossfader
@@ -616,9 +652,11 @@ func performMixGesture(_ request: [String:Any]) async throws -> [String:Any] {
     var current = first
     do {
         for step in 1...steps {
-            if step > 1 { current = try await checkedObservation(mixerOnly:true,reusingGuardIdentity:current) }
+            if step > 1 { current = try await checkedObservation(mixerOnly:true,reusingGuardIdentity:current,
+                                                               inputReserveNS:150_000_000) }
             try guardFrame(current)
-            if let outgoing = spec.outgoing, let incoming = spec.incoming {
+            let pixels = mixBassStroke(total:spec.bassPixels,steps:steps,step:step)
+            if pixels > 0, let outgoing = spec.outgoing, let incoming = spec.incoming {
                 let vision = MixerVision(bitmap:NSBitmapImageRep(cgImage:current.image))
                 guard let outPosition = vision.eqPosition(outgoing,"low"),
                       let inPosition = vision.eqPosition(incoming,"low"),
@@ -626,27 +664,42 @@ func performMixGesture(_ request: [String:Any]) async throws -> [String:Any] {
                       vision.neutral(incoming,"low") == false else {
                     throw BridgeError("Bass-overdracht bereikt een grens of de stand is onbekend; geen extra EQ-beweging.")
                 }
-                let pixels = spec.bassPixels/Double(steps)
                 let outX = outgoing == 1 ? 613.0 : 659.0
                 let inX = incoming == 1 ? 613.0 : 659.0
-                try await pointer(CGPoint(x:outX,y:283),observation:current,
-                    dragTo:CGPoint(x:outX,y:283+pixels),preDispatch:{try guardFrame(current)})
-                dispatched = true
-                // The one physical pointer performs paired changes sequentially,
-                // within this local operation. There is no network wait between.
-                try await pointer(CGPoint(x:inX,y:283),observation:current,
-                    dragTo:CGPoint(x:inX,y:283-pixels),preDispatch:{try guardFrame(current)})
+                current = try await performFreshGuardedPair(current, read:{ frame in
+                    try await checkedObservation(mixerOnly:true,reusingGuardIdentity:frame,
+                                                 inputReserveNS:150_000_000)
+                }, validate:guardFrame, first:{ frame in
+                    try await pointer(CGPoint(x:outX,y:283),observation:frame,
+                        dragTo:CGPoint(x:outX,y:283+pixels),preDispatch:{try guardFrame(frame)})
+                    dispatched = true
+                }, second:{ frame in
+                    let freshVision = MixerVision(bitmap:NSBitmapImageRep(cgImage:frame.image))
+                    guard let position = freshVision.eqPosition(incoming,"low"),
+                          position < -0.04, freshVision.neutral(incoming,"low") == false else {
+                        throw BridgeError("Inkomende bass veranderde of is niet leesbaar; geen extra EQ-beweging.")
+                    }
+                    try await pointer(CGPoint(x:inX,y:283),observation:frame,
+                        dragTo:CGPoint(x:inX,y:283-pixels),preDispatch:{try guardFrame(frame)})
+                })
                 appliedBass += pixels
             }
             if let target = spec.crossfader, let origin = startCross {
                 // A combined operation gets a new guard frame after the EQ pair,
                 // so a slow render never turns into a stale fader movement.
                 if spec.bassPixels > 0 {
-                    current = try await checkedObservation(mixerOnly:true,reusingGuardIdentity:current)
+                    current = try await checkedObservation(mixerOnly:true,reusingGuardIdentity:current,
+                                                           inputReserveNS:150_000_000)
                 }
                 try guardFrame(current)
                 let value = origin+(target-origin)*Double(step)/Double(steps)
-                try await pointer(CGPoint(x:585+101*value,y:385),observation:current,
+                guard let measured = MixerVision(bitmap:NSBitmapImageRep(cgImage:current.image)).crossfader else {
+                    throw BridgeError("Crossfaderstand niet leesbaar; geen volgende beweging.")
+                }
+                // Grab the observed handle. Clicking the rail can be ignored
+                // when the requested step falls inside the handle itself.
+                try await pointer(CGPoint(x:585+101*measured,y:385),observation:current,
+                                  dragTo:CGPoint(x:585+101*value,y:385),
                                   preDispatch:{try guardFrame(current)})
                 dispatched = true
             }
@@ -698,6 +751,6 @@ func performMixGesture(_ request: [String:Any]) async throws -> [String:Any] {
             "measuredCrossfader":finalFacts.crossfader as Any? ?? NSNull(),
             "measuredBass":["outgoing":finalFacts.outgoingBass as Any? ?? NSNull(),
                             "incoming":finalFacts.incomingBass as Any? ?? NSNull()]],
-        "note":"Local interpolation with a fresh image guard per step. Paired inputs are sequential. EQ angle is not dB or audio loudness. Duration is best effort.",
+        "note":"Local interpolation with a fresh image guard before each paired EQ stroke and fader movement. EQ angle is not dB or audio loudness. Duration is best effort.",
         "after":after.json]
 }

@@ -1,0 +1,164 @@
+[
+  {
+    "order": 1,
+    "id": "direction",
+    "question": "Welke sfeer wil ik neerzetten?",
+    "needs": "Setopdracht, gespeelde nummers, energieverloop en eventueel publieksreacties.",
+    "answers": "Opbouwen / vasthouden / ademruimte / afbouwen.",
+    "binding": null,
+    "status": "planned"
+  },
+  {
+    "order": 2,
+    "id": "opening",
+    "question": "Speelt er muziek, en waarmee begin ik anders?",
+    "needs": "Bevestigde afspeelstatus, hoorbare routes en kandidaten uit map 26.",
+    "answers": "Nummer-ID; laden / starten / wachten.",
+    "binding": "transport,next_track",
+    "status": "active"
+  },
+  {
+    "order": 3,
+    "id": "passage",
+    "question": "Wat gebeurt er nu en straks in het huidige nummer?",
+    "needs": "Afspeelpositie en beschikbare offline tijdlijn; echte sectielabels ontbreken.",
+    "answers": "Gemeten energie/bass/aanvallen/verandering; onbekend waar niet gemeten.",
+    "binding": "audio_context",
+    "status": "observation"
+  },
+  {
+    "order": 4,
+    "id": "next_intent",
+    "question": "Wat moet het volgende nummer toevoegen?",
+    "needs": "Setrichting, geschiedenis en vergelijkbare eigenschappen van kandidaten.",
+    "answers": "Meer energie / voortbouwen / contrast / rust / onvoldoende informatie.",
+    "binding": null,
+    "status": "planned"
+  },
+  {
+    "order": 5,
+    "id": "track",
+    "question": "Welk nummer kies ik?",
+    "needs": "Beschikbare kandidaten: genre, tempo, toonaard, duur en recente nummers.",
+    "answers": "Een beschikbaar nummer-ID uit map 26; alleen gebruikt bij laden.",
+    "binding": "next_track",
+    "status": "active"
+  },
+  {
+    "order": 6,
+    "id": "compatibility",
+    "question": "Kunnen deze twee nummers samengaan?",
+    "needs": "Tempo/toonaard, routes en tijdlijnen van beide decks; zang is onbekend.",
+    "answers": "Technisch toegestaan / niet toegestaan; muzikale afweging in de actievragen.",
+    "binding": "transport",
+    "status": "partial"
+  },
+  {
+    "order": 7,
+    "id": "entry_point",
+    "question": "Waar in het nieuwe nummer begin ik?",
+    "needs": "Betrouwbare cuepunten, structuur en geteste seek-bediening.",
+    "answers": "Nu uitsluitend begin van de track met bestaande maatuitlijning.",
+    "binding": null,
+    "status": "unsupported"
+  },
+  {
+    "order": 8,
+    "id": "technique",
+    "question": "Welke overgang past bij deze combinatie?",
+    "needs": "Beide passages en daadwerkelijk ondersteunde bedieningsmogelijkheden.",
+    "answers": "Nu mengen met fader, bass, midden en hoog, of wachten; kort echo-accent; cut/loop niet beschikbaar.",
+    "binding": "transport,crossfader,bass,mid,high",
+    "status": "partial"
+  },
+  {
+    "order": 9,
+    "id": "launch_window",
+    "question": "Wanneer past het om de overgang te beginnen?",
+    "needs": "Laatste aanhoudende terugkeer van lage tonen en aanvallen, hele tijdlijn, beide klokken; kicks en climax blijven vermoedens.",
+    "answers": "Kickpatroon / laatste sectie / hoogtepunt voorbij / passage geschikt; onzeker is een geldig antwoord. Mixtijd wordt berekend.",
+    "binding": "kick_pattern,last_section,post_peak,entry_fit,transport",
+    "status": "active"
+  },
+  {
+    "order": 10,
+    "id": "overlap",
+    "question": "Hoe lang laat ik de nummers overlappen?",
+    "needs": "Gemeten overlap, beschikbare tijd en beide muzikale passages.",
+    "answers": "Overlap aanhouden / voortzetten / afronden; 32/64 maten zijn bestaande voorkeuren.",
+    "binding": "transport,crossfader",
+    "status": "partial"
+  },
+  {
+    "order": 11,
+    "id": "readiness",
+    "question": "Staat het nieuwe nummer werkelijk klaar?",
+    "needs": "Trackidentiteit, route, sync, tempo, EQ en startpositie.",
+    "answers": "Voorbereiden / EQ herstellen / klaar; bepaald uit fysieke controles.",
+    "binding": "transport",
+    "status": "active"
+  },
+  {
+    "order": 12,
+    "id": "launch",
+    "question": "Start ik het nieuwe nummer nu?",
+    "needs": "Startvenster, gereedheid en genoeg tijd om uitlijning en overdracht te voltooien.",
+    "answers": "play_A / play_B / hold, voor zover nu toegestaan.",
+    "binding": "transport",
+    "status": "active"
+  },
+  {
+    "order": 13,
+    "id": "introduction",
+    "question": "Hoe maak ik het nieuwe nummer hoorbaar?",
+    "needs": "Beide decks spelen, bevestigde uitlijning, faderstand en bassbalans.",
+    "answers": "Fader hold / A / center / B; alleen gebruikt bij mix.",
+    "binding": "crossfader",
+    "status": "active"
+  },
+  {
+    "order": 14,
+    "id": "result",
+    "question": "Werkt de combinatie zoals bedoeld?",
+    "needs": "Teruggelezen bediening en bronmetingen; live mixaudio ontbreekt.",
+    "answers": "Bediening bevestigd / niet bevestigd; hoorbare kwaliteit nog niet beoordeelbaar.",
+    "binding": "verification",
+    "status": "partial"
+  },
+  {
+    "order": 15,
+    "id": "adjustment",
+    "question": "Wat pas ik nu aan?",
+    "needs": "Bevestigde mixerstand, beide tijdlijnen en resterende overgangstijd.",
+    "answers": "hold / mix; fader- en EQ-doelen; beweging van 2 / 4 / 8 / 16 beats.",
+    "binding": "transport,crossfader,bass,mid,high,duration",
+    "status": "active"
+  },
+  {
+    "order": 16,
+    "id": "bass_exchange",
+    "question": "Wanneer neemt het nieuwe nummer de bass over?",
+    "needs": "Bron-bass van beide passages, huidige EQ, overgangsrichting en resterende tijd.",
+    "answers": "Bass behouden, licht/middel/diep overdragen of verdelen; geen boost boven neutraal.",
+    "binding": "bass",
+    "status": "active"
+  },
+  {
+    "order": 17,
+    "id": "exit",
+    "question": "Wanneer verdwijnt het oude nummer?",
+    "needs": "Bevestigde inkomende/uitgaande rol, overlapduur en naderend einde.",
+    "answers": "Fader naar inkomend deck / verder mengen / wachten; daarna oud deck stoppen.",
+    "binding": "transport,crossfader",
+    "status": "active"
+  },
+  {
+    "order": 18,
+    "id": "cleanup",
+    "question": "Is de overgang klaar en kan ik verder?",
+    "needs": "Fader-eindpunt, afspeelstatus en neutrale EQ van beide decks.",
+    "answers": "Oud deck stoppen / EQ herstellen / verse opvolger laden.",
+    "binding": "transport",
+    "status": "active"
+  }
+]

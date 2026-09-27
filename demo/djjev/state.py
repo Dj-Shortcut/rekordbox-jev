@@ -67,7 +67,8 @@ def displayed_bpm(value):
 
 def read_library(export_path=None, music_root=None):
     """Read only exported MP3 files physically inside Music/Music/26."""
-    export = Path(export_path or Path.home()/'Desktop/rekordbox.xml')
+    prepared = Path(__file__).resolve().parents[1]/'library/rekordbox.xml'
+    export = Path(export_path or (prepared if prepared.is_file() else Path.home()/'Desktop/rekordbox.xml'))
     root = Path(music_root or Path.home()/'Music/Music/26').resolve()
     def numeric(value):
         try:
@@ -82,6 +83,7 @@ def read_library(export_path=None, music_root=None):
             continue
         tracks.append({'id': track_id(path.name), 'file': path.name, 'folder': '26',
             'title': item.get('Name') or path.stem, 'artist': item.get('Artist'),
+            'genre': (item.get('Genre') or '').strip() or None,
             'bpm': numeric(item.get('AverageBpm')), 'key': item.get('Tonality') or None,
             'duration': numeric(item.get('TotalTime')), 'beatgrid': [
                 {'position_seconds': numeric(t.get('Inizio')), 'bpm': numeric(t.get('Bpm')),
@@ -138,7 +140,12 @@ def normalize(raw, library, version, *, now_ns=None):
             return invalid('Track identity is not uniquely known in folder 26.')
         bpm = displayed_bpm(displayed)
         key = re.search(r'\b\d{2,3}[.,]\d+\s+([A-G](?:b|#)?m?)(?=\s|$)', metadata or '')
-        times = re.findall(r'(-?)(\d{2,3}):(\d{2})\.(\d)', metadata or '')
+        # Vision sometimes reads the last zero of 00:00.0 as Cyrillic 'о'.
+        # Correct only a zero glyph in the decimal digit of a clock-shaped token;
+        # never rewrite artist/title text or infer a missing clock from duration.
+        clock_text = re.sub(r'(\b[0-9]{2,3}:[0-5][0-9][.,])[oOоО](?=$|[\s|])',
+                            r'\g<1>0', metadata or '')
+        times = re.findall(r'([-−]?)([0-9]{2,3}):([0-5][0-9])[.,]([0-9])(?=$|[\s|])', clock_text)
         elapsed = [int(m)*60+int(s)+int(d)/10 for sign,m,s,d in times if not sign and int(s)<60]
         remaining = [int(m)*60+int(s)+int(d)/10 for sign,m,s,d in times if sign and int(s)<60]
         neutrals = mm.get('eq_neutral', {}).get(str(n), {})
@@ -150,7 +157,11 @@ def normalize(raw, library, version, *, now_ns=None):
             'remaining': remaining[0] if len(elapsed)==len(remaining)==1 else None,
             'channel': channel, 'bass': bass if number(bass, -1, 1) else None,
             'eq_neutral': {band: neutrals.get(band) for band in BANDS},
+            'eq_position': {band: (0. if neutrals.get(band) is True else
+                value if number(value, -1, 1) else None) for band in BANDS
+                for value in [mm.get('eq_position', {}).get(str(n), {}).get(band)]},
             'sync': mm.get('beat_sync_lit', {}).get(str(n)), 'master': mm.get('master_lit', {}).get(str(n)),
             'cue_offset': cue_offset(track, bpm) if track else None}
+    result['effects'] = {'subtle_echo_supported': body.get('effects', {}).get('subtleEcho') is True}
     result['valid'] = True
     return result

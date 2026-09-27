@@ -8,6 +8,8 @@ swiftc -swift-version 5 -O -parse-as-library -module-cache-path "$cache_dir" \
   -target arm64-apple-macos14.0 "$project_dir/Sources/JevWidget.swift" "$project_dir/Sources/JevControls.swift" "$project_dir/Sources/JevProbeControls.swift" \
   -o "$app_dir/Contents/MacOS/jev-widget"
 cp "$project_dir/assets/dj-jev-background.png" "$app_dir/Contents/Resources/dj-jev-background.png"
+cp "$project_dir/assets/dj-jev.icns" "$app_dir/Contents/Resources/dj-jev.icns"
+cp "$project_dir/assets/dj-questions.json" "$app_dir/Contents/Resources/dj-questions.json"
 rm -f "$app_dir/Contents/Resources/dj-jev-footer.jpg"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -17,10 +19,11 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>DJ Jev</string>
 <key>CFBundleExecutable</key><string>jev-widget</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleVersion</key><string>16</string>
+<key>CFBundleShortVersionString</key><string>0.8.1</string>
+<key>CFBundleIconFile</key><string>dj-jev</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>LSUIElement</key><true/>
+<key>LSUIElement</key><false/>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

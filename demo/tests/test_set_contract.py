@@ -157,7 +157,7 @@ class FixtureChoices:
     async def ask(self,request):
         self.requests.append(deepcopy(request));await asyncio.sleep(.001)
         q=request['questions'];d=request['state']['decks']; options=q['transport']['criteria']
-        selected={'transport':'hold','crossfader':'hold','bass':'hold','duration':'beats4'}
+        selected={'transport':'hold','crossfader':'hold','bass':'hold','mid':'hold','high':'hold','duration':'beats4'}
         if 'next_track' in q:
             # Candidate name order is fixture policy, never production ranking.
             candidate_order={t['id']:i for i,t in enumerate(tracks())}

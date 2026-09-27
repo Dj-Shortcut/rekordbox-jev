@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CoreFoundation
 
 private typealias Object = [String: Any]
 private func object(_ value: Any?) -> Object { value as? Object ?? [:] }
@@ -27,12 +28,14 @@ private struct Run: Identifiable {
     var result: Object
     var error: String
     var label: String
+    var execution: Object = [:]
     var payload: Object { object(request["payload"]) }
     var questions: Object { object(payload["questions"]) }
     var state: Object { object(payload["state"]) }
     var synthetic: Bool { string(request["provenance"]) == "synthetic_example" }
     var version: Int { object(state["tutorial_guidance"])["version"] as? Int ?? 1 }
     var statusText: String {
+        if synthetic { return "Voorbeeldgegevens · geen live Jev-antwoord" }
         switch status {
         case "preview": return "Nog niet aan Jev verstuurd"
         case "answered": return "Echt Jev-antwoord"
@@ -81,7 +84,7 @@ private final class Monitor: ObservableObject {
         }
         let events = evidence.appendingPathComponent("jev-events")
         let files = ((try? FileManager.default.contentsOfDirectory(at:events,includingPropertiesForKeys:nil)) ?? [])
-            .filter{$0.pathExtension == "json"}.sorted{modified($0) > modified($1)}.prefix(40)
+            .filter{$0.pathExtension == "json"}.sorted{modified($0) > modified($1)}.prefix(200)
         // A fast refresh must not repeatedly decode the same answers and reshuffle
         // equal-probability rows. Only changed event files rebuild the questions.
         let signature = files.map { $0.lastPathComponent + ":" + String(modified($0)) }.joined(separator:"|")
@@ -97,7 +100,7 @@ private final class Monitor: ObservableObject {
             // Never attach an answer to a different question snapshot.
             if status == "answered" && string(result["payload_id"]) != string(request["payload_id"]) { continue }
             values.append(Run(id:string(event["id"]),started:event["started_at"] as? Double ?? modified(file),
-                              status:status,request:request,result:result,error:string(event["error"]),label:string(request["kind"]) == "jev_reactive_request" ? "DJ-beslissing" : "Aanroep"))
+                              status:status,request:request,result:result,error:string(event["error"]),label:string(request["kind"]) == "jev_reactive_request" ? "DJ-beslissing" : "Aanroep", execution:object(event["execution"])))
         }
         let legacy = evidence.appendingPathComponent("jev-live-example.json")
         if let result = readObject(legacy), let request = readObject(evidence.appendingPathComponent("jev-live-example.request.json")),
@@ -108,7 +111,10 @@ private final class Monitor: ObservableObject {
                               result:result,error:"",label:"Eerste verbindingstest"))
         }
         values.sort{$0.started > $1.started}
-        let newest = values.first?.id ?? ""
+        // Keep the latest complete answer on screen while the next request is
+        // in flight. Otherwise rapid polling replaces readable answers with
+        // spinners for most of the set.
+        let newest = values.first(where:{$0.status == "answered"})?.id ?? values.first?.id ?? ""
         let reactivePreview = evidence.appendingPathComponent("jev-reactive-preview.json")
         if let request = readObject(reactivePreview) {
             values.insert(Run(id:"reactive-preview-"+string(request["payload_id"]),started:modified(reactivePreview),status:"preview",
@@ -119,8 +125,12 @@ private final class Monitor: ObservableObject {
             values.append(Run(id:"preview-"+string(request["payload_id"]),started:modified(preview),status:"preview",
                               request:request,result:[:],error:"",label:"Voorbereide vraag"))
         }
+        // Keep a frozen request readable even after it leaves the live history window.
+        if !followLatest, let frozen = selected, !values.contains(where:{$0.id == frozen.id}) {
+            values.append(frozen)
+        }
         if selectedID.isEmpty || !values.contains(where:{$0.id == selectedID}) || (followLatest && newest != lastNewest && !newest.isEmpty) {
-            selectedID = values.first?.id ?? ""
+            selectedID = newest.isEmpty ? (values.first?.id ?? "") : newest
         }
         lastNewest = newest
         runs = values
@@ -128,9 +138,9 @@ private final class Monitor: ObservableObject {
     }
 }
 
-private let mint = Color(red:0.35,green:0.9,blue:0.73)
-private let muted = Color.white.opacity(0.57)
-private let widgetBackground = Color(red:0.065,green:0.08,blue:0.095)
+private let mint = Color(red:0.45,green:1.0,blue:0.8)
+private let muted = Color(red:0.74,green:0.77,blue:0.8)
+private let widgetBackground = Color(red:0.035,green:0.045,blue:0.055)
 private let backgroundPhoto: NSImage? = {
     guard let url = Bundle.main.url(forResource:"dj-jev-background",withExtension:"png") else { return nil }
     return NSImage(contentsOf:url)
@@ -152,8 +162,24 @@ private struct Card<Content: View>: View {
             .overlay(RoundedRectangle(cornerRadius:13).stroke(Color.white.opacity(0.07),lineWidth:1))
     }
 }
+private struct WidgetHeightKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(),uniquingKeysWith: { _, latest in latest })
+    }
+}
+private extension View {
+    func measureWidgetHeight(_ name: String) -> some View {
+        background(GeometryReader { geometry in
+            Color.clear.preference(key:WidgetHeightKey.self,value:[name:geometry.size.height])
+        })
+    }
+}
+
 private struct Inspector: View {
     @ObservedObject var monitor: Monitor
+    var readOnly = false
+    var fitContent: (CGFloat) -> Void = { _ in }
     @StateObject private var probe = JevProbeControls()
     private func candidateTitle(_ choice: String, run: Run) -> String? {
         if let title = object(object(run.state["candidates"])[choice])["title"] as? String { return title }
@@ -179,14 +205,42 @@ private struct Inspector: View {
         let formatter = DateFormatter(); formatter.locale = Locale(identifier:"nl_BE"); formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from:Date(timeIntervalSince1970:run.started))
     }
+    private func eqChoiceLabel(_ choice: String, id: String) -> String? {
+        if id == "bass" {
+            return ["hold":"Bassbalans zo houden", "A":"Bass naar A", "B":"Bass naar B",
+                    "balanced":"Bass verdelen", "A_gentle":"Lichte basswissel naar A",
+                    "B_gentle":"Lichte basswissel naar B", "A_deep":"Diepe basswissel naar A",
+                    "B_deep":"Diepe basswissel naar B"][choice]
+        }
+        guard id == "mid" || id == "high" else { return nil }
+        let band = id == "mid" ? "Midden" : "Hoog"
+        return ["hold":band + " zo houden", "neutral":band + " herstellen",
+                "A_soft":band + " A licht terug", "B_soft":band + " B licht terug",
+                "A_cut":band + " A verder terug", "B_cut":band + " B verder terug"][choice]
+    }
+    private func timingChoiceLabel(_ choice: String, id: String) -> String? {
+        guard ["kick_pattern","last_section","post_peak","entry_fit"].contains(id) else { return nil }
+        return ["plausible":"Kickpatroon aannemelijk", "unclear":"Patroon onzeker",
+                "supported":"Laatste kicksectie aannemelijk", "unsuitable":"Geen geschikt moment",
+                "unknown":"Onvoldoende informatie", "past":"Hoogtepunt vermoedelijk voorbij",
+                "ahead":"Nog ontwikkeling verwacht", "suitable":"Geschikt om in te mixen",
+                "protect":"Passage nog laten spelen"][choice]
+    }
+    private func clockLabel(_ seconds: Double) -> String {
+        let value = max(0, Int(seconds.rounded()))
+        return String(format:"%d:%02d",value / 60,value % 60)
+    }
     private func answerLabel(_ id: String, run: Run) -> String {
         let answer = run.answer(id)
         let choice = string(answer["choice"])
         if choice.isEmpty { return run.status == "pending" ? "Jev denkt…" : "Nog geen antwoord" }
+        if id == "crossfader" { return ["A":"Deck A laten horen","center":"Beide decks mengen","B":"Deck B laten horen","hold":"Fader zo houden"][choice] ?? choice }
+        if let label = eqChoiceLabel(choice, id:id) { return label }
+        if let label = timingChoiceLabel(choice, id:id) { return label }
         if choice == "hold" && id == "transport" { return "Muziek laten lopen" }
         if let title = candidateTitle(choice,run:run) { return title }
         if id == "length", Int(choice) != nil { return choice + " maten" }
-        let labels = ["none":"Geen wijziging", "hold":"Even wachten", "mix":"Overgang voortzetten", "start_A":"Deck A starten",
+        let labels = ["none":"Geen wijziging", "hold":"Even wachten", "echo_A":"Kort echo-accent op A", "echo_B":"Kort echo-accent op B", "mix":"Overgang voortzetten", "start_A":"Deck A starten",
                       "start_B":"Deck B starten", "stop_A":"Deck A stoppen", "handover_to_B":"Bass overdragen naar B",
                       "stop_B":"Deck B stoppen", "load_A":"Nummer laden op A", "load_B":"Nummer laden op B",
                       "play_A":"Deck A starten", "play_B":"Deck B starten", "prepare_A":"Deck A voorbereiden", "prepare_B":"Deck B voorbereiden",
@@ -198,18 +252,25 @@ private struct Inspector: View {
         return labels[choice] ?? optionLabel(choice,question:object(run.questions[id]),run:run)
     }
     private func compactQuestion(_ id: String, _ question: Object) -> String {
-        let labels = ["bass":"Bass overdragen?", "levels":"Faders bewegen?", "transport":"Wat doet Jev nu?",
+        let labels = ["kick_pattern":"Waar keren de kicks terug?", "last_section":"Is dit de laatste kicksectie?", "post_peak":"Is het hoogtepunt voorbij?", "entry_fit":"Past inmixen op dit moment?", "mid":"Ruimte maken in het midden?", "high":"Hoe helder mag het klinken?", "bass":"Hoe wisselt de bass?", "levels":"Faders bewegen?", "transport":"Wat doet Jev nu?",
                       "track":"Welk nummer volgt?", "opening_track":"Welk nummer starten?", "next_track":"Welk nummer volgt?", "action":"Wat doet Jev nu?", "dj_action":"Wat doet Jev nu?", "gesture":"Hoe snel deze beweging?", "duration":"Hoe snel deze beweging?", "crossfader":"Waarheen met de fader?", "length":"Hoe lang mixen?"]
         let instructions = object(question["instructions"])
         let task = string(instructions["task"]).isEmpty ? string(question["instructions"]) : string(instructions["task"])
         return labels[id] ?? (task.isEmpty ? id : task.firstIndex(of:"?").map { String(task[...$0]) } ?? task)
     }
     private func choiceLabel(_ choice: String, id: String, run: Run) -> String {
+        if id == "crossfader" { return ["A":"Deck A laten horen","center":"Beide decks mengen","B":"Deck B laten horen","hold":"Fader zo houden"][choice] ?? choice }
+        if let label = eqChoiceLabel(choice, id:id) { return label }
+        if let label = timingChoiceLabel(choice, id:id) { return label }
         if let title = candidateTitle(choice,run:run) { return title }
         if id == "length", Int(choice) != nil { return choice + " maten" }
-        let labels = ["none":"Geen wijziging", "hold":"Zo houden", "mix":"Overgang voortzetten", "start_A":"Deck A starten",
-                      "start_B":"Deck B starten", "stop_A":"Deck A stoppen", "handover_to_B":"Bass naar B",
-                      "bring_in_B":"B inmixen", "remove_A":"A uitmixen", "wait":"Wachten"]
+        let labels = ["none":"Geen wijziging", "hold":"Zo houden", "echo_A":"Kort echo-accent op A", "echo_B":"Kort echo-accent op B", "mix":"Overgang voortzetten", "start_A":"Deck A starten",
+                      "start_B":"Deck B starten", "stop_A":"Deck A stoppen", "stop_B":"Deck B stoppen", "handover_to_B":"Bass naar B",
+                      "bring_in_B":"B inmixen", "remove_A":"A uitmixen", "wait":"Wachten",
+                      "load_A":"Nummer laden op A", "load_B":"Nummer laden op B",
+                      "play_A":"Deck A starten", "play_B":"Deck B starten", "prepare_A":"Deck A voorbereiden", "prepare_B":"Deck B voorbereiden",
+                      "reset_A":"EQ van A herstellen", "reset_B":"EQ van B herstellen", "align_A":"Beats van A gelijkzetten", "align_B":"Beats van B gelijkzetten",
+                      "beats2":"2 beats", "beats4":"4 beats", "beats8":"8 beats", "beats16":"16 beats"]
         return labels[choice] ?? optionLabel(choice,question:object(run.questions[id]),run:run)
     }
     private func sortedChoices(_ probabilities: Object) -> [String] {
@@ -225,7 +286,7 @@ private struct Inspector: View {
         return choice.isEmpty ? Array(sorted.prefix(4)) : [choice] + Array(sorted.filter{$0 != choice}.prefix(3))
     }
     private func isMixBranch(_ id: String, run: Run) -> Bool {
-        ["crossfader","bass","duration"].contains(id)
+        ["crossfader","bass","mid","high","duration"].contains(id)
             && object(object(run.questions["transport"])["criteria"])["mix"] != nil
     }
     private func isLoadBranch(_ id: String, run: Run) -> Bool {
@@ -233,202 +294,333 @@ private struct Inspector: View {
         return id == "next_track" && (transport["load_A"] != nil || transport["load_B"] != nil)
     }
     private func orderedQuestions(_ run: Run) -> [String] {
-        let order = ["transport":0,"next_track":1,"crossfader":2,"bass":3,"duration":4]
+        let order = ["kick_pattern":0,"last_section":1,"post_peak":2,"entry_fit":3,"transport":4,"next_track":5,"crossfader":6,"bass":7,"mid":8,"high":9,"duration":10]
         return run.questions.keys.sorted {
-            let a = order[$0] ?? 5, b = order[$1] ?? 5
+            let a = order[$0] ?? 11, b = order[$1] ?? 11
             return a == b ? $0 < $1 : a < b
         }
     }
+    private func executionLabel(_ run: Run) -> String {
+        if run.status == "pending" { return "Jev kiest…" }
+        if run.status == "preview" { return "Nog niet verstuurd" }
+        switch string(run.execution["status"]) {
+        case "dispatch": return "Wordt uitgevoerd"
+        case "verified":
+            guard run.execution["verified"] as? Bool == true else { return "Bediening niet bevestigd" }
+            return object(run.execution["decision"])["transport"] as? String == "hold"
+            ? "Muziek blijft lopen" : "Bediening bevestigd"
+        case "ignored": return "Niet uitgevoerd · verworpen"
+        case "execution_deferred": return "Uitgesteld"
+        case "execution_reconciling": return "Mixer opnieuw controleren"
+        case "execution_reconciled": return "Hersteld · nieuwe beslissing"
+        case "error": return "Uitvoering niet bevestigd"
+        default: return "Geen uitvoeringsgegevens"
+        }
+    }
+    private func readable(_ value: Any?) -> String {
+        guard let value, !(value is NSNull) else { return "Onbekend" }
+        if let boolean = value as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() {
+            return boolean.boolValue ? "Ja" : "Nee"
+        }
+        return String(describing:value)
+    }
+    private func freeze() { monitor.followLatest = false }
+
+    private var liveLabel: String {
+        if readOnly { return "Voorbeeld" }
+        if !monitor.followLatest { return "Beeldpauze" }
+        if monitor.sessionPhase == "preparing" && probe.running { return "Voorbereiden" }
+        if probe.running && monitor.sessionPhase.contains("blocked") { return "Onderbroken" }
+        return probe.running ? "Live" : probe.connected ? "Verbonden" : "Niet verbonden"
+    }
+    private var liveTint: Color {
+        probe.running && monitor.sessionPhase.contains("blocked") ? .orange : probe.connected && monitor.followLatest ? mint : muted
+    }
+    private func resumeFollowing() {
+        monitor.followLatest = true
+        if let latest = monitor.runs.first(where:{$0.status == "answered"}) {
+            monitor.selectedID = latest.id
+        }
+    }
     var body: some View {
-        VStack(alignment:.leading,spacing:12) {
-            HStack {
-                Image(systemName:"waveform").foregroundStyle(mint)
-                Text("DJ Jev").font(.system(size:15,weight:.semibold,design:.rounded))
+        VStack(alignment:.leading,spacing:10) {
+            HStack(spacing:10) {
+                Text("Jev").font(.system(size:20,weight:.semibold,design:.rounded))
+                HStack(spacing:5) {
+                    Circle().fill(liveTint).frame(width:5,height:5)
+                    Text(liveLabel).font(.system(size:10,weight:.medium)).foregroundStyle(liveTint)
+                }
                 Spacer()
-                if let run = monitor.selected {
-                    // A timestamp distinguishes old answers from live activity without an extra status panel.
-                    Text(timeLabel(run)).font(.system(size:10,design:.monospaced)).foregroundStyle(muted)
+                Button {
+                    if monitor.followLatest { freeze() } else { resumeFollowing() }
+                } label: { Image(systemName:monitor.followLatest ? "pause" : "play") }
+                .buttonStyle(.plain)
+                .accessibilityLabel(monitor.followLatest ? "Beeld pauzeren" : "Live volgen")
+                .help("Alleen het beeld pauzeren; de DJ-set blijft doorgaan.")
+                Button {
+                    NSApp.windows.first(where:{$0.title == "DJ Jev"})?.miniaturize(nil)
+                } label: { Image(systemName:"minus") }
+                .buttonStyle(.plain).accessibilityLabel("Minimaliseren")
+                .help("Verberg het venster; een draaiende DJ-set blijft doorgaan.")
+                Menu {
+                    Button("Live vragen") { monitor.tab = 0; resumeFollowing() }
+                    Button("Context") { monitor.tab = 1 }
+                    Button("DJ-checklist") { monitor.tab = 2 }
+                    Button("Volledige gegevens") { monitor.tab = 3 }
+                    Menu("Geschiedenis") {
+                        ForEach(Array(monitor.runs.prefix(20))) { run in
+                            Button(timeLabel(run)) { monitor.selectedID = run.id; monitor.tab = 0; freeze() }
+                        }
+                    }
+                    Divider()
+                    Button("Vergroten of herstellen") {
+                        NSApp.windows.first(where:{$0.title == "DJ Jev"})?.zoom(nil)
+                    }
+                } label: { Image(systemName:"ellipsis") }
+                .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Meer weergaven")
+            }
+            if monitor.tab != 0 {
+                HStack {
+                    Button { monitor.tab = 0 } label: { Label("Vragen",systemImage:"chevron.left") }
+                        .buttonStyle(.plain)
+                    Spacer()
+                    Text([1:"Context",2:"DJ-checklist",3:"Volledige gegevens"][monitor.tab] ?? "")
+                        .font(.system(size:12)).foregroundStyle(muted)
                 }
             }
-            if let run = monitor.selected {
-                ScrollView {
-                    VStack(alignment:.leading,spacing:10) {
-                        HStack(spacing:6) {
-                            Circle().fill(run.status == "pending" ? Color.orange : muted).frame(width:6,height:6)
-                            Text(run.status == "pending" ? "Nieuwe vraag aan Jev…" : "Laatste antwoord · " + timeLabel(run))
-                                .font(.system(size:10)).foregroundStyle(muted)
-                            if let seconds = run.result["request_seconds"] as? Double {
-                                Spacer()
-                                Text(String(format:"%.2f s",seconds)).font(.system(size:10,design:.monospaced)).foregroundStyle(muted)
-                            }
-                        }
-                        if run.questions.isEmpty || run.status == "error" {
-                            HStack(alignment:.top,spacing:8) {
-                                Image(systemName:run.status == "error" ? "exclamationmark.circle" : "info.circle").foregroundStyle(.orange)
-                                Text(!run.error.isEmpty ? run.error : string(run.result["message"]))
-                                    .font(.system(size:12)).foregroundStyle(muted)
-                            }
-                        }
-                        ForEach(orderedQuestions(run),id:\.self) { id in
-                            let question = object(run.questions[id])
-                            let answer = run.answer(id)
-                            let choice = string(answer["choice"])
-                            let probabilities = object(answer["probabilities"])
-                            let mixBranch = isMixBranch(id,run:run)
-                            let loadBranch = isLoadBranch(id,run:run)
-                            let transportChoice = string(run.answer("transport")["choice"])
-                            let unused = !transportChoice.isEmpty &&
-                                ((mixBranch && transportChoice != "mix") ||
-                                 (loadBranch && !["load_A","load_B"].contains(transportChoice)))
-                            let questionLabel = loadBranch ? "Bij laden: welk nummer?" :
-                                (mixBranch ? "Bij mengen: " : "") + compactQuestion(id,question)
-                            let answerTint = unused ? muted : mint
-                            VStack(alignment:.leading,spacing:9) {
-                                HStack(alignment:.top,spacing:8) {
-                                    Image(systemName:choice.isEmpty ? "ellipsis.circle" : unused ? "minus.circle" : "checkmark.circle.fill")
-                                        .foregroundStyle(choice.isEmpty ? Color.orange : answerTint)
-                                    Text(questionLabel)
-                                        .font(.system(size:13,weight:.medium)).foregroundStyle(unused ? muted : Color.white)
-                                }
-                                if unused {
-                                    Text("Niet uitgevoerd · Jev koos " + answerLabel("transport",run:run))
-                                        .font(.system(size:10)).foregroundStyle(muted)
-                                } else if id == "next_track" && run.questions["dj_action"] != nil {
-                                    Text("Gebruikt wanneer Jev kiest om te laden").font(.system(size:10)).foregroundStyle(muted)
-                                } else if id == "gesture" {
-                                    Text("Gebruikt bij een fader- of bassbeweging").font(.system(size:10)).foregroundStyle(muted)
-                                }
-                                Text(answerLabel(id,run:run))
-                                    .font(.system(size:20,weight:.semibold,design:.rounded)).foregroundStyle(answerTint)
-                                ForEach(visibleChoices(probabilities,choice:choice),id:\.self) { option in
-                                    let probability = probabilities[option] as? Double ?? 0
-                                    VStack(alignment:.leading,spacing:4) {
-                                        HStack {
-                                            Text(choiceLabel(option,id:id,run:run)).lineLimit(1)
-                                            Spacer()
-                                            Text(String(format:"%.0f%%",probability*100)).monospacedDigit()
-                                        }.font(.system(size:10)).foregroundStyle(option == choice ? answerTint : muted)
-                                        ProgressView(value:min(1,max(0,probability))).tint(option == choice ? answerTint : Color.white.opacity(0.22))
+            ScrollView(.vertical) {
+                VStack(alignment:.leading,spacing:12) {
+                    if probe.running && monitor.sessionPhase == "preparing" {
+                        Text(monitor.sessionAction).font(.system(size:15,weight:.medium)).foregroundStyle(mint)
+                            .fixedSize(horizontal:false,vertical:true)
+                    } else if let run = monitor.selected {
+                        if monitor.tab == 0 {
+                            let ids = orderedQuestions(run)
+                            VStack(alignment:.leading,spacing:12) {
+                                ForEach(Array(stride(from:0,to:ids.count,by:2)),id:\.self) { index in
+                                    HStack(alignment:.top,spacing:16) {
+                                        answerRow(ids[index],run:run).frame(maxWidth:.infinity,alignment:.leading)
+                                        if index+1 < ids.count {
+                                            answerRow(ids[index+1],run:run).frame(maxWidth:.infinity,alignment:.leading)
+                                        } else { Color.clear.frame(height:1).frame(maxWidth:.infinity) }
                                     }
                                 }
-                                if probabilities.count > 4 {
-                                    Text("\(probabilities.count) mogelijkheden beoordeeld").font(.system(size:10)).foregroundStyle(muted)
-                                }
-                            }.padding(12).frame(maxWidth:.infinity,alignment:.leading)
-                            .background(widgetBackground.opacity(0.72),in:RoundedRectangle(cornerRadius:12))
-                            .overlay(RoundedRectangle(cornerRadius:12).stroke(choice.isEmpty ? Color.orange.opacity(0.3) : answerTint.opacity(0.22),lineWidth:1))
+                            }
+                        } else if monitor.tab == 1 {
+                            requestSummary(run)
+                            contextView(run)
+                        } else if monitor.tab == 2 {
+                            checklistView(run)
+                        } else {
+                            Card {
+                                Text("Exacte aanvraag aan Jev").font(.headline)
+                                Text(pretty(run.payload)).font(.system(size:11,design:.monospaced))
+                                    .textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
+                            }
+                            Card {
+                                Text("Exact antwoord van Jev").font(.headline)
+                                Text(pretty(run.result)).font(.system(size:11,design:.monospaced))
+                                    .textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
+                                Text("Uitvoering").font(.headline)
+                                Text(pretty(run.execution)).font(.system(size:11,design:.monospaced))
+                                    .textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
+                            }
                         }
+                    } else if monitor.tab == 2 {
+                        checklistView(nil)
+                    } else {
+                        Text("Wachten op Jevs eerste antwoord…").foregroundStyle(muted)
                     }
-                }
-            } else {
-                HStack { Image(systemName:"ellipsis.circle").foregroundStyle(.orange); Text("Wachten op de eerste vraag…").font(.system(size:12)).foregroundStyle(muted) }
-                Spacer(minLength:0)
+                }.padding(.trailing,4).padding(.vertical,4)
+                    .measureWidgetHeight("content")
             }
-            VStack(alignment:.leading,spacing:5) {
-                HStack(spacing:8) {
-                    Button {
-                        monitor.followLatest = true
-                        probe.toggle()
-                    } label: {
-                        Label(probe.running ? "Stop" : "Start", systemImage:probe.running ? "stop.fill" : "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent).tint(mint.opacity(0.8))
-                    .disabled(probe.busy)
-                    if probe.busy { ProgressView().controlSize(.small) }
-                    Spacer(minLength:0)
-                }
-                if !monitor.sessionAction.isEmpty {
-                    Text(monitor.sessionAction).font(.system(size:11)).foregroundStyle(["trial_blocked", "set_blocked", "provider_retry", "observation_retry"].contains(monitor.sessionPhase) ? Color.orange : mint)
+            .scrollIndicators(.visible)
+            .frame(maxWidth:.infinity,maxHeight:.infinity)
+            .measureWidgetHeight("viewport")
+            HStack(alignment:.center,spacing:12) {
+                Button {
+                    resumeFollowing()
+                    probe.toggle()
+                } label: {
+                    Label(probe.running ? "Stop set" : "Start set",systemImage:probe.running ? "stop.fill" : "play.fill")
+                }.buttonStyle(.borderedProminent).tint(mint.opacity(0.8)).disabled(probe.busy || readOnly)
+                Spacer(minLength:0)
+                if monitor.sessionPhase != "preparing", let run = monitor.selected {
+                    Text(probe.running ? executionLabel(run) : "Laatste antwoord · " + timeLabel(run))
+                        .font(.system(size:10)).foregroundStyle(muted)
                         .fixedSize(horizontal:false,vertical:true)
                 }
-                if !probe.status.isEmpty {
-                    Text(probe.status).font(.system(size:10)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
-                }
+            }
+            if (probe.running && monitor.sessionPhase.contains("blocked")) || (!probe.status.isEmpty && probe.status != "DJ Jev gestopt · muziek blijft spelen") {
+                Text(probe.status.isEmpty ? monitor.sessionAction : probe.status)
+                    .font(.system(size:11)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
             }
         }
-        .padding(12).frame(minWidth:276,minHeight:160)
+        .padding(12).frame(minWidth:352,minHeight:230,maxHeight:.infinity)
+        .measureWidgetHeight("total")
+        .onPreferenceChange(WidgetHeightKey.self) { heights in
+            if let content = heights["content"], let viewport = heights["viewport"], let total = heights["total"], content > 0 {
+                fitContent(ceil(content + total - viewport))
+            }
+        }
         .background(alignment:.bottomTrailing) {
             if let backgroundPhoto {
-                Image(nsImage:backgroundPhoto)
-                    .resizable().scaledToFit()
+                Image(nsImage:backgroundPhoto).resizable().scaledToFit()
                     .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.bottomTrailing)
-                    .opacity(0.5).allowsHitTesting(false).accessibilityHidden(true)
+                    .opacity(0.32)
+                    .overlay {
+                        LinearGradient(colors:[widgetBackground.opacity(0.65), .clear],
+                                       startPoint:.topLeading,endPoint:.bottomTrailing)
+                    }
+                    .allowsHitTesting(false).accessibilityHidden(true)
             }
         }
-        .background(widgetBackground).clipped().preferredColorScheme(.dark)
+        .background(widgetBackground).preferredColorScheme(.dark)
     }
-    @ViewBuilder private func questionView(_ id: String, _ question: Object, _ run: Run) -> some View {
-        let instructions = object(question["instructions"])
-        let task = string(instructions["task"]).isEmpty ? string(question["instructions"]) : string(instructions["task"])
+
+    @ViewBuilder private func requestSummary(_ run: Run) -> some View {
+        VStack(alignment:.leading,spacing:5) {
+            HStack(alignment:.top) {
+                Text("\(run.questions.count) vragen · \(run.questions.keys.filter{!run.answer($0).isEmpty}.count) antwoorden")
+                Spacer()
+                Text(timeLabel(run)).monospacedDigit()
+            }.font(.system(size:11)).foregroundStyle(muted)
+            let entry = object(object(run.state["musical_timing"])["entry_preference"])
+            let candidate = object(entry["candidate"])
+            if let start = candidate["start_seconds"] as? Double {
+                Text("Mogelijke laatste kicksectie · " + clockLabel(start))
+                    .font(.system(size:14,weight:.semibold)).fixedSize(horizontal:false,vertical:true)
+                if let wait = candidate["seconds_until_start"] as? Double,
+                   let budget = candidate["suggested_overlap_seconds"] as? Double {
+                    Text((string(candidate["position"]) == "after" ? "Sectie voorbij" : wait > 0 ? "Nog " + clockLabel(wait) : "Sectie bereikt")
+                         + " · mixtijd tot " + clockLabel(budget))
+                        .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+                }
+                Text("Geschat uit bronmetingen · exacte frase onbekend")
+                    .font(.system(size:10)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+            } else if run.questions["last_section"] != nil {
+                Text("Geen duidelijke laatste kicksectie · terugval op resterende tijd")
+                    .font(.system(size:12)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+            }
+            Text(executionLabel(run)).font(.system(size:12,weight:.medium)).foregroundStyle(mint)
+                .fixedSize(horizontal:false,vertical:true)
+            if !run.error.isEmpty { Text(run.error).font(.system(size:11)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true) }
+        }
+    }
+
+    @ViewBuilder private func answerRow(_ id: String, run: Run) -> some View {
+        let question = object(run.questions[id])
         let answer = run.answer(id)
         let choice = string(answer["choice"])
-        let probabilities = object(answer["probabilities"])
-        let options = object(question["criteria"])
-        Card {
-            Text("VRAAG AAN JEV").font(.system(size:10,weight:.bold)).foregroundStyle(mint)
-            Text(task.isEmpty ? id : task).font(.system(size:13,weight:.medium)).textSelection(.enabled)
-            if !choice.isEmpty {
-                Divider().overlay(Color.white.opacity(0.08))
-                Text(optionLabel(choice,question:question,run:run)).font(.system(size:22,weight:.semibold,design:.rounded))
-                HStack {
-                    Text(string(run.result["model"])).foregroundStyle(muted)
-                    Spacer()
-                    if let seconds = run.result["request_seconds"] as? Double { Text(String(format:"%.3f s",seconds)).monospacedDigit().foregroundStyle(mint) }
-                }.font(.system(size:11))
-            } else {
-                Text(run.status == "pending" ? "Wachten op antwoord…" : "Nog geen antwoord op deze vraag.")
-                    .foregroundStyle(muted).font(.system(size:12))
-            }
-        }
-        Card {
-            Text(choice.isEmpty ? "Antwoordopties" : "Kansen per antwoordoptie").font(.system(size:12,weight:.semibold))
-            ForEach(options.keys.sorted(),id:\.self) { option in
-                VStack(alignment:.leading,spacing:5) {
-                    HStack {
-                        if option == choice { Image(systemName:"checkmark.circle.fill").foregroundStyle(mint) }
-                        Text(optionLabel(option,question:question,run:run)).font(.system(size:12))
-                        Spacer()
-                        if let value = probabilities[option] as? Double { Text(String(format:"%.0f%%",value*100)).font(.system(size:12,weight:.semibold)).monospacedDigit() }
+        let probability = object(answer["probabilities"])[choice] as? Double
+        let transport = string(run.answer("transport")["choice"])
+        let unused = !transport.isEmpty && ((isMixBranch(id,run:run) && transport != "mix") ||
+            (isLoadBranch(id,run:run) && !["load_A","load_B"].contains(transport)))
+        let tint = unused ? muted : mint
+        VStack(alignment:.leading,spacing:5) {
+            VStack(alignment:.leading,spacing:4) {
+                Text(compactQuestion(id,question))
+                    .font(.system(size:11,weight:.medium)).foregroundStyle(Color.white.opacity(0.94))
+                    .fixedSize(horizontal:false,vertical:true)
+                HStack(alignment:.firstTextBaseline,spacing:5) {
+                    Text(answerLabel(id,run:run))
+                        .font(.system(size:14,weight:.semibold,design:.rounded))
+                        .foregroundStyle(tint).fixedSize(horizontal:false,vertical:true).textSelection(.enabled)
+                    if unused {
+                        Image(systemName:"minus.circle").font(.system(size:11)).foregroundStyle(muted)
+                            .help("Dit antwoord is niet gebruikt bij de gekozen actie.")
+                            .accessibilityLabel("Niet gebruikt")
                     }
-                    if let value = probabilities[option] as? Double { ProgressView(value:min(1,max(0,value))).tint(option == choice ? mint : Color.white.opacity(0.35)) }
-                    DisclosureGroup("Beschrijving") {
-                        Text(pretty(options[option] ?? "")).font(.system(size:10,design:.monospaced)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)
-                    }.font(.system(size:10)).foregroundStyle(muted)
-                }.padding(.vertical,3)
-            }
-            if let confidence = answer["confidence"] as? Double {
-                Divider()
-                Text(String(format:"Confidence %.2f · spreiding van de modelkeuze",confidence)).font(.system(size:10)).foregroundStyle(muted)
-                Text("Jev geeft bij deze vraag geen geschreven toelichting.").font(.system(size:10)).foregroundStyle(muted)
+                }
+            }.frame(maxWidth:.infinity,alignment:.leading)
+            if let probability, probability.isFinite, (0...1).contains(probability) {
+                HStack(spacing:5) {
+                    Text(String(format:"%.0f%%",probability * 100))
+                        .font(.system(size:11,weight:.semibold,design:.rounded)).monospacedDigit().foregroundStyle(tint)
+                    GeometryReader { geometry in
+                        Capsule().fill(Color.white.opacity(0.16))
+                            .overlay(alignment:.leading) {
+                                Capsule().fill(tint).frame(width:geometry.size.width * probability)
+                            }
+                    }.frame(width:36,height:3)
+                }
+                .accessibilityElement(children:.ignore)
+                .accessibilityLabel("Waarschijnlijkheid van het gekozen antwoord")
+                .accessibilityValue(String(format:"%.0f procent",probability * 100))
+                .help("Jevs waarschijnlijkheid voor dit antwoord binnen de aangeboden opties; geen garantie dat het muzikaal juist is.")
+            } else {
+                Text("—").foregroundStyle(muted).frame(width:50)
+                    .accessibilityLabel("Waarschijnlijkheid niet beschikbaar")
             }
         }
+        .padding(.vertical,1)
+    }
+
+    @ViewBuilder private func contextView(_ run: Run) -> some View {
+        let context = object(run.state["dj_context"])
+        let situation = string(context["situation"])
+        let names = ["opening_or_recovery":"Openen of hervatten", "select_or_prepare":"Opvolger kiezen of voorbereiden",
+            "prepared_successor":"Opvolger klaar · instapmoment kiezen", "alignment_needed":"Beats uitlijnen",
+            "overlap":"Nummers mengen", "handoff_cleanup":"Overgang afronden en opruimen", "executing":"Bediening bezig"]
         Card {
-            DisclosureGroup("Volledige vraaginstructies") {
-                Text(pretty(question["instructions"] ?? "")).font(.system(size:11)).textSelection(.enabled).padding(.top,6)
-            }.font(.system(size:12,weight:.medium))
+            Text("Wat Jev bij deze aanvraag wist").font(.headline)
+            Text(names[situation] ?? "Geen situatiebeschrijving in deze oudere aanvraag")
+                .foregroundStyle(mint).fixedSize(horizontal:false,vertical:true)
+            Text("Context bij deze aanvraag")
+                .font(.system(size:11)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+        }
+        let decks = object(run.state["decks"])
+        ForEach(decks.keys.sorted(),id:\.self) { name in
+            let deck = object(decks[name])
+            let details = object(object(context["decks"])[name])
+            Card {
+                Text("Deck " + name + " · " + readable(deck["title"])).font(.headline).fixedSize(horizontal:false,vertical:true)
+                Text("Genre: " + readable(details["genre"]) + " · Tempo: " + readable(deck["bpm"]) + " · Toonaard: " + readable(deck["key"]))
+                    .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+                Text("Speelt: " + readable(deck["playing"]) + " · Positie: " + readable(deck["elapsed"]) + " s · Resterend: " + readable(deck["remaining"]) + " s")
+                    .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+                Text("Audioanalyse: " + readable(details["audio_evidence"]) + " · Zang: " + readable(details["vocal_activity"]))
+                    .font(.system(size:11)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+            }
+        }
+        ForEach(["musical_timing","transition","audio_context","continuity","recent_meaningful_actions","candidates"],id:\.self) { key in
+            let labels = ["musical_timing":"Timing en overlap", "transition":"Inkomend en uitgaand nummer",
+                "audio_context":"Gemeten bass en energie per passage", "continuity":"Continuïteit en gereedheid",
+                "recent_meaningful_actions":"Eerder bevestigde acties", "candidates":"Beschikbare opvolgers"]
+            Card {
+                DisclosureGroup(labels[key] ?? key) {
+                    Text(pretty(run.state[key] ?? "Niet beschikbaar in deze aanvraag"))
+                        .font(.system(size:11,design:.monospaced)).textSelection(.enabled)
+                        .fixedSize(horizontal:false,vertical:true).padding(.top,8)
+                }.font(.system(size:13)).tint(mint)
+            }
         }
     }
-    @ViewBuilder private func musicView(_ run: Run) -> some View {
-        let music = object(run.state["music"])
-        let tracks = object(music["tracks"])
-        if run.synthetic {
-            Card { Text("Dit zijn verzonnen voorbeeldtracks, geen live aflezing van Rekordbox.").foregroundStyle(.orange).font(.system(size:12)) }
-        }
-        ForEach(tracks.keys.sorted(),id:\.self) { id in
-            let track = object(tracks[id])
-            Card {
-                Text(string(track["title"]).isEmpty ? id : string(track["title"])).font(.system(size:14,weight:.semibold))
-                HStack {
-                    if let bpm = track["bpm"] as? Double { Pill(text:String(format:"%.0f BPM",bpm)) }
-                    let key = string(track["key"])
-                    if !key.isEmpty { Pill(text:key,tint:.white.opacity(0.7)) }
-                }
-                Text(string(track["description"])).font(.system(size:12)).foregroundStyle(muted).textSelection(.enabled)
-            }
-        }
+
+    @ViewBuilder private func checklistView(_ run: Run?) -> some View {
+        let context = object(run?.state["dj_context"])
+        let active = Set((context["checklist"] as? [Object] ?? []).compactMap{$0["order"] as? Int})
+        let url = Bundle.main.url(forResource:"dj-questions",withExtension:"json")
+        let data = url.flatMap{try? Data(contentsOf:$0)}
+        let questions = data.flatMap{try? JSONSerialization.jsonObject(with:$0)} as? [Object] ?? []
         Card {
-            Text("Muziekmarkeringen en context").font(.system(size:12,weight:.semibold))
-            Text(pretty(music)).font(.system(size:10,design:.monospaced)).textSelection(.enabled)
+            Text("De 18 menselijke DJ-vragen").font(.headline)
+            Text("Gemarkeerd = relevant voor deze aanvraag. Dit is een checklist, geen lijst modelantwoorden.")
+                .font(.system(size:12)).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+        }
+        ForEach(questions.indices,id:\.self) { index in
+            let item = questions[index]
+            let order = item["order"] as? Int ?? index+1
+            let statuses = ["active":"Aangesloten op huidige keuzes", "partial":"Gedeeltelijk ondersteund",
+                "planned":"Nog te bouwen als aparte keuze", "observation":"Informatie uit de tools", "unsupported":"Bediening nog niet beschikbaar"]
+            Card {
+                Text("\(order). " + string(item["question"])).font(.system(size:14,weight:.semibold))
+                    .foregroundStyle(active.contains(order) ? mint : .white).fixedSize(horizontal:false,vertical:true)
+                if active.contains(order) { Pill(text:"Relevant voor deze aanvraag") }
+                Text("Nodig: " + string(item["needs"])).font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+                Text("Mogelijkheden: " + string(item["answers"])).font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
+                Text(statuses[string(item["status"])] ?? "Onbekend").font(.system(size:11)).foregroundStyle(muted)
+            }
         }
     }
 }
@@ -442,8 +634,39 @@ private final class FloatingPanel: NSPanel {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var panel: FloatingPanel?
     private var monitor: Monitor?
+    private var resizeWork: DispatchWorkItem?
+    private var requestedHeight: CGFloat = 0
+    private func fitContent(_ height: CGFloat) {
+        guard height.isFinite, height > 0, abs(height-requestedHeight) > 1 else { return }
+        requestedHeight = height
+        resizeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let panel = self.panel, !panel.inLiveResize,
+                  let screen = panel.screen ?? NSScreen.main else { return }
+            let bounds = screen.visibleFrame.insetBy(dx:12,dy:12)
+            let chrome = panel.frame.height-panel.contentRect(forFrameRect:panel.frame).height
+            let target = min(bounds.height,max(230,height)+chrome)
+            guard abs(panel.frame.height-target) > 2 else { return }
+            var frame = panel.frame
+            let top = min(bounds.maxY,max(bounds.minY+target,frame.maxY))
+            frame.origin.y = top-target
+            frame.size.height = target
+            panel.setFrame(frame,display:true,animate:false)
+        }
+        resizeWork = work
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.25,execute:work)
+    }
+    func windowDidEndLiveResize(_ notification: Notification) {
+        let height = requestedHeight
+        requestedHeight = 0
+        fitContent(height)
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menu = NSMenu()
+        let appItem = NSMenuItem(title:"DJ Jev",action:nil,keyEquivalent:"")
+        let appMenu = NSMenu(title:"DJ Jev")
+        appMenu.addItem(withTitle:"Stop DJ Jev",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
+        appItem.submenu = appMenu; menu.addItem(appItem)
         let editItem = NSMenuItem(title:"Wijzig",action:nil,keyEquivalent:"")
         let editMenu = NSMenu(title:"Wijzig")
         editMenu.addItem(withTitle:"Knip",action:#selector(NSText.cut(_:)),keyEquivalent:"x")
@@ -451,28 +674,78 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         editMenu.addItem(withTitle:"Plak",action:#selector(NSText.paste(_:)),keyEquivalent:"v")
         editMenu.addItem(withTitle:"Selecteer alles",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a")
         editItem.submenu = editMenu; menu.addItem(editItem); NSApplication.shared.mainMenu = menu
-        let root = URL(fileURLWithPath:"/private/tmp/rekordbox-bridge-\(getuid())/widget",isDirectory:true)
+        let args = CommandLine.arguments
+        let previewRoot = args.firstIndex(of:"--evidence-root").flatMap { $0+1 < args.count ? args[$0+1] : nil }
+            ?? Bundle.main.object(forInfoDictionaryKey:"JevPreviewRoot") as? String
+        let root = URL(fileURLWithPath:previewRoot ?? "/private/tmp/rekordbox-bridge-\(getuid())/widget",isDirectory:true)
         let model = Monitor(root:root); monitor = model
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x:0,y:0,width:1440,height:900)
-        let height = min(490.0,visible.height-40)
-        let panel = FloatingPanel(contentRect:NSRect(x:visible.maxX-350,y:visible.maxY-height-20,width:330,height:height),
-                                  styleMask:[.titled,.closable,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
+        let height = min(380.0,visible.height-70)
+        let width = min(400.0,visible.width-40)
+        let panel = FloatingPanel(contentRect:NSRect(x:visible.maxX-width-20,y:visible.maxY-height-30,width:width,height:height),
+                                  styleMask:[.titled,.closable,.miniaturizable,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
         panel.title = "DJ Jev"
-        panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .visible; panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true; panel.level = .floating; panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary]
-        panel.isMovableByWindowBackground = true; panel.minSize = NSSize(width:300,height:230)
+        panel.isMovableByWindowBackground = false
+        panel.contentMinSize = NSSize(width:376,height:230)
         panel.delegate = self; panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView:Inspector(monitor:model))
+        let hosting = NSHostingView(rootView:Inspector(monitor:model,readOnly:previewRoot != nil,fitContent:{ [weak self] height in self?.fitContent(height) }))
+        hosting.sizingOptions = []
+        panel.contentView = hosting
+        panel.setFrameAutosaveName(previewRoot == nil ? "DJJevInspectorV3" : "DJJevInspectorPreviewV3")
         self.panel = panel
         panel.orderFrontRegardless()
     }
     func windowWillClose(_ notification: Notification) { NSApplication.shared.terminate(nil) }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        panel?.deminiaturize(nil)
+        panel?.orderFrontRegardless()
+        return true
+    }
 }
 @main private enum WidgetMain {
     static func main() {
+        if CommandLine.arguments.contains("--check-monitor") {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("jev-monitor-test-"+UUID().uuidString)
+            let events = root.appendingPathComponent("evidence/jev-events")
+            try! FileManager.default.createDirectory(at:events,withIntermediateDirectories:true)
+            defer { try? FileManager.default.removeItem(at:root) }
+            func record(_ id: String, _ started: Double, _ status: String) {
+                let value: Object = ["id":id,"started_at":started,"status":status,
+                    "request":["payload_id":id,"payload":["questions":[:],"state":[:]]],
+                    "result":status == "answered" ? ["payload_id":id,"answers":[:]] : [:]]
+                try! JSONSerialization.data(withJSONObject:value).write(to:events.appendingPathComponent(id+".json"),options:.atomic)
+            }
+            record("one",1,"answered")
+            record("pending",2,"pending")
+            let model = Monitor(root:root)
+            precondition(model.selectedID == "one", "A pending request must not hide the last answer")
+            record("two",3,"answered")
+            model.refresh()
+            precondition(model.selectedID == "two", "Follow completed answers live")
+            model.followLatest = false
+            record("three",4,"answered")
+            model.refresh()
+            precondition(model.selectedID == "two", "Reading freeze must hold its request")
+            try! FileManager.default.removeItem(at:events.appendingPathComponent("two.json"))
+            record("four",5,"answered")
+            model.refresh()
+            precondition(model.selectedID == "two" && model.selected != nil, "Frozen answers survive history rotation")
+            model.followLatest = true
+            record("five",6,"answered")
+            model.refresh()
+            precondition(model.selectedID == "five")
+            print("Widget monitor: live antwoorden, wachtende aanvraag, leespauze en geschiedenis gecontroleerd.")
+            return
+        }
         if CommandLine.arguments.contains("--check-controls") {
+            precondition(JevProbeControls.statusAfterConnection(active:false,wasRunning:false,previous:"Bridge niet bereikbaar") == "")
+            precondition(JevProbeControls.statusAfterConnection(active:false,wasRunning:false,previous:"Sleutel niet beschikbaar") == "Sleutel niet beschikbaar")
+            precondition(JevProbeControls.statusAfterConnection(active:false,wasRunning:true,previous:"Bridge niet bereikbaar · de set kan nog draaien").contains("gestopt"))
+            precondition(JevProbeControls.statusAfterConnection(active:true,wasRunning:false,previous:"Bridge niet bereikbaar") == "")
             precondition(JevControls.validSecret("example-test-token"))
             precondition(!JevControls.validSecret(""))
             precondition(!JevControls.validSecret("x\ny"))
@@ -493,7 +766,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         let app = NSApplication.shared
         let delegate = AppDelegate(); app.delegate = delegate
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.run()
         withExtendedLifetime(delegate) {}
     }

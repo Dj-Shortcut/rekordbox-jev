@@ -234,6 +234,19 @@ func uniqueChosenBrowserToken(_ rows: [TextToken], title: String, identity: Chos
     return nil
 }
 
+func requireLoadTrackTitles(actual: [String:String], expected: [String:String], inputSent: Bool) throws {
+    guard Set(expected.keys) == Set(["1","2"]) else {
+        throw BridgeError("Ongeldige decktitelcontrole voor laden.")
+    }
+    guard (1...2).allSatisfy({transportTitle(actual[String($0)] ?? "") == transportTitle(expected[String($0)] ?? "")}) else {
+        let message = "Geladen decktitels gewijzigd tijdens laden; geen volgende laadhandeling verstuurd."
+        if !inputSent {
+            throw PreDispatchRejection(code:"tracks_changed",description:message,retryable:true)
+        }
+        throw BridgeError(message)
+    }
+}
+
 func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
     var inputSent = false
     var guardTrace: [[String:Any]] = []
@@ -305,10 +318,8 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
         try requireLiveRequest()
         try requireFolder26(image)
         if let expectedTracks = request["expectedTracks"] as? [String:String] {
-            guard Set(expectedTracks.keys) == Set(["1","2"]),
-                  (1...2).allSatisfy({transportTitle(deckTitle(image,$0)) == transportTitle(expectedTracks[String($0)] ?? "")}) else {
-                throw BridgeError("Geladen decktitels gewijzigd tijdens laden; geen volgende laadhandeling verstuurd.")
-            }
+            try requireLoadTrackTitles(actual:["1":deckTitle(image,1),"2":deckTitle(image,2)],
+                                       expected:expectedTracks,inputSent:inputSent)
         }
         if replacing {
             try requireReplaceableDeck(image,deck,expected:expectedOld!,
@@ -636,4 +647,133 @@ func openMusicFolder26(_ request: [String:Any] = [:]) async throws -> [String:An
     }
     return ["dispatched":true,"verified":false,"after":after.json,
             "note":"Mapselectie eenmaal verstuurd; kop 26 is nog niet bevestigd."]
+}
+
+// Startup-only library refresh through Rekordbox's normal menus and save panel.
+// Fixed export directory and fixed import folder; no recording/preferences UI.
+func refreshLibraryExport(_ request: [String:Any]) async throws -> [String:Any] {
+    try requireInputAccess()
+    let rb = try app()
+    let ax = AXUIElementCreateApplication(rb.processIdentifier)
+    let directory = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("evidence/library",isDirectory:true)
+    try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+    let target = directory.appendingPathComponent("rekordbox-"+UUID().uuidString+".xml")
+    func attribute(_ node: AXUIElement, _ name: String) -> CFTypeRef? {
+        var result: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(node,name as CFString,&result) == .success else { return nil }
+        return result
+    }
+    func find(_ root: AXUIElement, _ predicate: (AXUIElement) -> Bool) -> AXUIElement? {
+        var queue: [(AXUIElement,Int)] = [(root,0)]
+        var index = 0
+        while index < queue.count && index < 2000 {
+            let (node,depth) = queue[index]; index += 1
+            if predicate(node) { return node }
+            if depth < 10, let children = attribute(node,kAXChildrenAttribute) as? [AXUIElement] {
+                queue.append(contentsOf:children.map { ($0,depth+1) })
+            }
+        }
+        return nil
+    }
+    func live() throws {
+        try requireLiveControlRequest(request)
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == rb.processIdentifier else {
+            throw BridgeError("Bibliotheek bijwerken onderbroken: Rekordbox staat niet meer vooraan.")
+        }
+    }
+    func waitFor(_ predicate: @escaping (AXUIElement) -> Bool) async throws -> AXUIElement {
+        for _ in 0..<80 {
+            try live()
+            if let node = find(ax,predicate) { return node }
+            try await Task.sleep(nanoseconds:100_000_000)
+        }
+        throw BridgeError("Bibliotheek bijwerken: verwacht Rekordbox-venster niet gevonden.")
+    }
+    func byID(_ id: String) async throws -> AXUIElement {
+        try await waitFor { attribute($0,kAXIdentifierAttribute) as? String == id }
+    }
+    func press(_ node: AXUIElement) throws {
+        try live()
+        guard attribute(node,kAXEnabledAttribute) as? Bool != false else { throw BridgeError("Bibliotheekknop is nog niet beschikbaar.") }
+        markNativeInputSent()
+        guard AXUIElementPerformAction(node,kAXPressAction as CFString) == .success else {
+            throw BridgeError("Rekordbox bevestigde de bibliotheekknop niet.")
+        }
+    }
+    func set(_ node: AXUIElement, _ value: String) throws {
+        try live(); markNativeInputSent()
+        guard AXUIElementSetAttributeValue(node,kAXValueAttribute as CFString,value as CFString) == .success else {
+            throw BridgeError("Bibliotheeklocatie kon niet worden ingevuld.")
+        }
+    }
+    func menu(_ titles: Set<String>) async throws {
+        let node = try await waitFor { titles.contains(attribute($0,kAXTitleAttribute) as? String ?? "") }
+        try press(node)
+    }
+    var exported = false
+    defer {
+        // Only dismiss the save panel created by this invocation, never a
+        // recording, user export, or unrelated dialog.
+        if !exported, (try? live()) != nil,
+           let panel = find(ax,{ attribute($0,kAXIdentifierAttribute) as? String == "save-panel" }),
+           let name = find(panel,{ attribute($0,kAXIdentifierAttribute) as? String == "saveAsNameTextField" }),
+           attribute(name,kAXValueAttribute) as? String == target.lastPathComponent,
+           let cancel = find(panel,{ attribute($0,kAXIdentifierAttribute) as? String == "CancelButton" }) {
+            try? press(cancel)
+        }
+    }
+    func panelKey(_ description: String) async throws {
+        try live()
+        let key = try prepareKeyEvent(description)
+        // AppKit's save-panel shortcuts require a normal foreground key event;
+        // Rekordbox's deck mappings also accept postToPid, these panels do not.
+        markNativeInputSent()
+        key.down.post(tap:.cghidEventTap)
+        defer { key.up.post(tap:.cghidEventTap) }
+        try await Task.sleep(nanoseconds:30_000_000)
+    }
+    func goTo(_ path: String) async throws {
+        try await panelKey("command + shift + g")
+        let field = try await byID("PathTextField")
+        try set(field,path)
+        try await panelKey("return")
+        for _ in 0..<80 {
+            try live()
+            if find(ax,{ attribute($0,kAXIdentifierAttribute) as? String == "PathTextField" }) == nil { return }
+            try await Task.sleep(nanoseconds:100_000_000)
+        }
+        throw BridgeError("De exportmap is niet bevestigd.")
+    }
+    if request["importFolder26"] as? Bool == true {
+        try await menu(["Bestand","File"])
+        try await menu(["Importeren","Import"])
+        try await menu(["Map importeren","Import Folder"])
+        _ = try await byID("open-panel")
+        try await goTo(allowedMusic.path)
+        try press(try await byID("OKButton"))
+        for _ in 0..<100 {
+            try live()
+            if (try? requireInputAccess()) != nil { break }
+            try await Task.sleep(nanoseconds:100_000_000)
+        }
+        try requireInputAccess()
+    }
+    try await menu(["Bestand","File"])
+    try await menu(["Verzameling exporteren in XML-indeling","Export Collection in xml format","Export Collection in XML format"])
+    let filename = try await byID("saveAsNameTextField")
+    try set(filename,target.lastPathComponent)
+    try await goTo(directory.path)
+    try press(try await byID("OKButton"))
+    var previousSize: UInt64 = 0
+    for _ in 0..<450 {
+        try live()
+        let size = (try? FileManager.default.attributesOfItem(atPath:target.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        if size > 0 && size == previousSize && (try? requireInputAccess()) != nil {
+            exported = true
+            return ["dispatched":true,"verified":true,"path":target.path,"bytes":size]
+        }
+        previousSize = size
+        try await Task.sleep(nanoseconds:100_000_000)
+    }
+    throw BridgeError("De bibliotheekexport is niet tijdig voltooid; geen set gestart.")
 }

@@ -8,6 +8,22 @@ struct MixerVision {
         guard calibrated else { return nil }
         return bitmap.colorAt(x:x,y:y)?.usingColorSpace(.deviceRGB)
     }
+    // Staging guards need only these four pixels. Building the full mixer JSON
+    // also scans every beat marker and EQ dial and can consume the input deadline.
+    var deckAssignments: [String:String] {
+        guard calibrated else { return [:] }
+        func blue(_ x: Int) -> Bool {
+            guard let c = rgb(x,379) else { return false }
+            return c.blueComponent > 0.3 && c.blueComponent > c.redComponent*1.7 && c.greenComponent > 0.2
+        }
+        var result: [String:String] = [:]
+        for deck in 1...2 {
+            let left = blue(deck == 1 ? 531 : 553)
+            let right = blue(deck == 1 ? 709 : 730)
+            result[String(deck)] = left && !right ? "left" : right && !left ? "right" : !left && !right ? "unassigned" : "unknown"
+        }
+        return result
+    }
     func markers(_ deck: Int) -> [Double] {
         guard calibrated else { return [] }
         let top = deck == 1 ? 49 : 110
