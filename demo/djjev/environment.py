@@ -174,6 +174,10 @@ class Native:
                 await asyncio.sleep(.1)
         raise HealthBlocked('bridge_start_timeout', f'{role} werd niet tijdig bereikbaar.')
 
+    @property
+    def health_in_progress(self):
+        return self._health_lock.locked()
+
     async def health(self):
         """Check between inputs; never queue health/focus behind a physical action."""
         if self.stopping or self.control_inhibited or self._role_locks['control'].locked():
@@ -305,7 +309,13 @@ class Rekordbox:
             raise RuntimeError(message)
 
         async def fresh():
-            current = await self.observe()
+            try:
+                current = await self.observe()
+            except NativeConnectionError as error:
+                if not control_attempted and error.role == 'observer':
+                    raise LocalPreDispatch('Observer tijdelijk niet bereikbaar; niets bediend.',
+                                           'observation_unavailable') from error
+                raise
             if not current.get('valid') or any(current['decks'][d]['title'] != titles[d] for d in ('A','B')):
                 reject_state('Tracks of waarneming veranderden tijdens de bediening.')
             return current
@@ -345,7 +355,7 @@ class Rekordbox:
             nonlocal state, dispatched, control_attempted
             if self.stopping:
                 raise asyncio.CancelledError()
-            if self.health_generation != action_generation:
+            if self.health_generation != action_generation or getattr(self.native, 'health_in_progress', False):
                 reject_state('Verbinding of focus hersteld tijdens de actie; nieuwe Jev-keuze nodig.', 'health_changed')
             if name == 'action':
                 action_deck = {'deck1': 'A', 'deck2': 'B'}[params['action'].split('.')[0]]

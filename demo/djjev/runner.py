@@ -424,6 +424,8 @@ class Runner:
                 return
             if self.explicitly_rejected_before_input(error):
                 self._expected_identities = None
+                if getattr(error, 'code', None) in ('observation_unavailable', 'health_changed'):
+                    self._needs_health_reconciliation = True
                 # No input occurred. Discard this answer; the actuation epoch
                 # and completion barrier above require a later observation and
                 # a new Jev response, never a replay of the rejected decision.

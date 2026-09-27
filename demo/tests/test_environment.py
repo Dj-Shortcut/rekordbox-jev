@@ -108,6 +108,40 @@ def decision(**values):
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observer_disconnect_before_input_is_explicitly_safe_to_defer(self):
+        from djjev.health import NativeConnectionError
+        frame = both(); native = Native(frame)
+        async def disconnected(role, name, **params):
+            raise NativeConnectionError(role, name, False, ConnectionRefusedError())
+        native.call = disconnected
+        env = Rekordbox(native, library())
+        with self.assertRaises(LocalPreDispatch) as caught:
+            await env.execute(decision(crossfader='B'), env.snapshot(frame))
+        self.assertEqual(caught.exception.code,'observation_unavailable')
+        self.assertFalse(caught.exception.commands_sent)
+        self.assertEqual(native.physical, [])
+
+    async def test_health_in_progress_defers_before_first_physical_input(self):
+        frame = both(); native = Native(frame); native.health_in_progress = True
+        env = Rekordbox(native, library())
+        with self.assertRaises(LocalPreDispatch):
+            await env.execute(decision(crossfader='B'), env.snapshot(frame))
+        self.assertEqual(native.physical, [])
+
+    async def test_recovery_generation_change_stops_remaining_bundle_inputs(self):
+        frame = both(); low(frame, 2, -.3)
+        native = Native(frame); native.generation = 0; original = native.call
+        async def recover_after_input(role, name, **params):
+            result = await original(role, name, **params)
+            if role == 'control' and name != 'openFolder26':
+                native.generation += 1
+            return result
+        native.call = recover_after_input
+        env = Rekordbox(native, library())
+        with self.assertRaisesRegex(RuntimeError, 'nieuwe Jev-keuze'):
+            await env.execute(decision(bass='B_gentle', crossfader='center'), env.snapshot(frame))
+        self.assertEqual(len(native.physical), 1)
+
     async def test_chosen_opening_play_opens_muted_route_with_both_decks_stopped(self):
         for selected in ('A','B'):
             with self.subTest(selected=selected):
