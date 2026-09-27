@@ -10,8 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # demo/djjev uses asyncio.timeout, which needs Python 3.11+.
-        python-version: ['3.11', '3.12', '3.13']
+        # 3.9 matches Apple's /usr/bin/python3, the app's last fallback.
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,6 +34,11 @@ jobs:
           python-version: '3.12'
       - name: Swift-toolchain
         run: swiftc --version
+      - name: Actieve kern met Apple's /usr/bin/python3 (terugvaloptie van de app)
+        working-directory: demo
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m unittest discover -s tests
       - name: Actieve DJ Jev-kern (demo/)
         working-directory: demo
         run: python -m unittest discover -s tests -v

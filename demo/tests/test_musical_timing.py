@@ -1,4 +1,5 @@
 """Pacing evidence and safety choices; no API, credentials or Rekordbox input."""
+import asyncio
 from copy import deepcopy
 import unittest
 
@@ -9,6 +10,14 @@ from djjev.runner import Runner
 
 
 class MusicalTimingTests(unittest.TestCase):
+    def setUp(self):
+        # Runner creates asyncio primitives; Python 3.9 binds them to the
+        # current loop at construction, so give synchronous tests one.
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.addCleanup(self.loop.close)
+        self.addCleanup(asyncio.set_event_loop, None)
+
     def prepared(self, *, elapsed=60, remaining=240, both=False, cross=0.):
         frame=loaded(loaded(raw(),playing=True),'B',1,both)
         frame['mixer'].update(crossfader_position=cross,red_bar_aligned=both)

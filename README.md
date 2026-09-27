@@ -10,7 +10,7 @@ De kern kan nu ook optionele offline Essentia-tijdlijnen rond beide afspeelposit
 
 De actieve bestanden zijn `demo/djjev/runner.py` (gelijktijdig lezen, Jev en bediening), `policy.py` (de echte vragen en antwoorden), `environment.py` (native opdrachten en controle) en `state.py` (uitlezing). `Sources/Bridge.swift`, `TrackTransport.swift` en `FastObservation.swift` bevatten de fysieke macOS-koppeling. `JevProbeControls.swift` start de reeds draaiende sleutelhouder; de huidige widget leest zelf geen sleutel.
 
-Offline controles van de nieuwe kern: `cd demo && python3 -m unittest discover -s tests`. GitHub Actions (`.github/workflows/tests.yml`) draait bij elke push beide testsuites op Python 3.11–3.13. Deze controles bedienen Rekordbox niet en bewijzen geen echte set. Alle bestanden hieronder buiten `demo/` die oude DJ-keuzes bevatten, blijven uitsluitend als ontwikkelgeschiedenis aanwezig.
+Offline controles van de nieuwe kern: `cd demo && python3 -m unittest discover -s tests`. GitHub Actions (`.github/workflows/tests.yml`) draait bij elke push beide testsuites op Python 3.9–3.13 en op macOS. Deze controles bedienen Rekordbox niet en bewijzen geen echte set. Alle bestanden hieronder buiten `demo/` die oude DJ-keuzes bevatten, blijven uitsluitend als ontwikkelgeschiedenis aanwezig.
 
 ## Historische overdracht van 21 september
 
@@ -36,7 +36,7 @@ Zie [HANDOFF.md](HANDOFF.md) voor de concrete problemen.
 
 ## Ontwikkeling
 
-Getest met Rekordbox 6.8.7 op Apple Silicon. Swift-builds richten zich op macOS 14+. Benodigd: Xcode command-line tools en Python 3.11+ (de actieve kern in `demo/` gebruikt `asyncio.timeout`). Alleen de optionele MP3-energieanalyse vereist `numpy` en `soundfile`.
+Getest met Rekordbox 6.8.7 op Apple Silicon. Swift-builds richten zich op macOS 14+. Benodigd: Xcode command-line tools en Python 3.9+. Zonder Homebrew-Python valt de app terug op Apple's `/usr/bin/python3`. Alleen de optionele MP3-energieanalyse vereist `numpy` en `soundfile`.
 
 ```sh
 python3 -m unittest discover -s tests -v

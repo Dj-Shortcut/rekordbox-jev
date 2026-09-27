@@ -542,7 +542,7 @@ class Runner:
                           observation_pending=self._observe_task is not None)
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.tick_interval)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     pass
         finally:
             await self.stop()
