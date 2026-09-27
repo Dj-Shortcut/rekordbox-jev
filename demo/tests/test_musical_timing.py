@@ -1,6 +1,9 @@
 """Pacing evidence and safety choices; no API, credentials or Rekordbox input."""
+import asyncio
 from copy import deepcopy
+import time
 import unittest
+from unittest import mock
 
 from test_policy import library, loaded, raw, snapshot, response
 from djjev import policy
@@ -8,7 +11,28 @@ from djjev.musical_timing import grid_hint
 from djjev.runner import Runner
 
 
+def use_late_monotonic_clock(test):
+    """Anchor overlap fixtures in the past without needing a long host uptime.
+
+    The fixtures stamp frames with the real monotonic clock and place the mix
+    start up to 20 s earlier; a freshly booted runner can be younger than that.
+    """
+    real = time.monotonic_ns
+    patcher = mock.patch('time.monotonic_ns', lambda: real() + 3_600_000_000_000)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
 class MusicalTimingTests(unittest.TestCase):
+    def setUp(self):
+        use_late_monotonic_clock(self)
+        # Runner creates asyncio primitives; Python 3.9 binds them to the
+        # current loop at construction, so give synchronous tests one.
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.addCleanup(self.loop.close)
+        self.addCleanup(asyncio.set_event_loop, None)
+
     def prepared(self, *, elapsed=60, remaining=240, both=False, cross=0.):
         frame=loaded(loaded(raw(),playing=True),'B',1,both)
         frame['mixer'].update(crossfader_position=cross,red_bar_aligned=both)

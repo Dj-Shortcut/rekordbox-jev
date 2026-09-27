@@ -128,7 +128,7 @@ class JevClient:
                 self._generation += 1
                 self._drop()
                 raise
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self._generation += 1
                 self._drop()
                 raise ClientError('TypeSafe answer deadline exceeded.', 'api_timeout') from None

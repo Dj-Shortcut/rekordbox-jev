@@ -10,8 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # demo/djjev uses asyncio.timeout, which needs Python 3.11+.
-        python-version: ['3.11', '3.12', '3.13']
+        # 3.9 matches Apple's /usr/bin/python3, the app's last fallback.
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,6 +34,28 @@ jobs:
           python-version: '3.12'
       - name: Swift-toolchain
         run: swiftc --version
+      - name: Vergelijk de klok van de Swift-bridge met die van Python
+        # The bridge stamps frames with DispatchTime uptime and policy.py
+        # rejects frames more than 3 s away from Python's time.monotonic_ns.
+        shell: bash
+        run: |
+          printf 'import Dispatch\nprint(DispatchTime.now().uptimeNanoseconds)\n' > "$RUNNER_TEMP/clock.swift"
+          swiftc "$RUNNER_TEMP/clock.swift" -o "$RUNNER_TEMP/clock"
+          for py in /usr/bin/python3 python; do
+            before=$("$RUNNER_TEMP/clock")
+            py_ns=$("$py" -c 'import time; print(time.monotonic_ns())')
+            after=$("$RUNNER_TEMP/clock")
+            echo "$py ($("$py" --version 2>&1)): swift=$before..$after python=$py_ns"
+            # Same clock: the Python reading lies between the two Swift readings.
+            if ! "$py" -c "import sys; sys.exit(0 if $before - 50_000_000 <= $py_ns <= $after + 50_000_000 else 1)"; then
+              echo "::warning::$py gebruikt een andere monotone klok dan de Swift-bridge"
+            fi
+          done
+      - name: Actieve kern met Apple's /usr/bin/python3 (terugvaloptie van de app)
+        working-directory: demo
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m unittest discover -s tests
       - name: Actieve DJ Jev-kern (demo/)
         working-directory: demo
         run: python -m unittest discover -s tests -v
