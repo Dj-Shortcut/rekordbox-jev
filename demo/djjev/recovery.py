@@ -54,3 +54,45 @@ def reconcileable_mix(result, snapshot, titles):
             and isinstance(verification.get('playing'), dict)
             and all(verification['playing'].get(d) is True for d in ('1', '2'))
             and mixer_state(snapshot, titles) is not None)
+
+
+def control_state(snapshot):
+    """Project readable controls, excluding advancing clocks and effect cooldown."""
+    if not isinstance(snapshot, dict) or snapshot.get('valid') is not True:
+        return None
+    decks = snapshot.get('decks', {})
+    mixer = snapshot.get('mixer', {})
+    if (set(decks) != {'A', 'B'} or not number(mixer.get('cross'), 0, 1)
+            or type(mixer.get('aligned')) is not bool):
+        return None
+    exact = [snapshot.get('folder'), mixer.get('assignments'), mixer['aligned']]
+    positions = [mixer['cross']]
+    tempos = []
+    for name in ('A', 'B'):
+        deck = decks[name]
+        if (not isinstance(deck.get('title'), str)
+                or any(type(deck.get(k)) is not bool for k in ('playing', 'sync', 'master'))
+                or not number(deck.get('channel'), 0, 1)):
+            return None
+        exact.extend(deck.get(k) for k in ('title', 'track_id', 'playing', 'sync', 'master'))
+        exact.append(deck.get('eq_neutral'))
+        positions.append(deck['channel'])
+        for band in ('low', 'mid', 'high', 'trim'):
+            value = deck.get('eq_position', {}).get(band)
+            if not number(value, -1, 1):
+                return None
+            positions.append(value)
+        bpm = deck.get('bpm')
+        if bpm is not None and not number(bpm, 1, 999):
+            return None
+        tempos.append(bpm)
+    return deepcopy((exact, positions, tempos))
+
+
+def same_control_state(previous, current):
+    """Allow visual control jitter, while comparing discrete state exactly."""
+    if previous is None or current is None or previous[0] != current[0]:
+        return False
+    return (all(abs(a-b) <= .025 for a, b in zip(previous[1], current[1]))
+            and all(a == b if a is None or b is None else abs(a-b) <= .1
+                    for a, b in zip(previous[2], current[2])))

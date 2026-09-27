@@ -168,7 +168,8 @@ def _history(history):
 
 def _transition(snapshot, history):
     anchor=history.get('transition') if isinstance(history,dict) else None
-    if not isinstance(anchor,dict) or anchor.get('source')!='verified_silent_successor_start':
+    if (not isinstance(anchor,dict) or anchor.get('source') not in
+            ('verified_silent_successor_start', 'observed_silent_successor_start')):
         return None
     incoming,outgoing=anchor.get('incoming'),anchor.get('outgoing')
     identity={n:{'title':d['title'],'track_id':d['track_id']} for n,d in snapshot['decks'].items()}

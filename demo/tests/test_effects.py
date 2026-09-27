@@ -50,3 +50,22 @@ class EffectTests(unittest.IsolatedAsyncioTestCase):
             else:
                 with self.assertRaisesRegex(RuntimeError,'uitschakelen'):await env.execute(decision(transport='echo_A'),s)
             self.assertEqual([name for _,name,_ in native.physical],['echoAccent'])
+
+    async def test_lost_echo_reply_starts_cooldown_without_replaying_accent(self):
+        """A transient accent may have run even when its reply is unavailable."""
+        frame = self.frame(); native = Native(frame); original = native.call
+        async def lost_reply(role, name, **params):
+            if name == 'echoAccent':
+                native.calls.append((role, name, params))
+                raise RuntimeError('reply lost after input')
+            return await original(role, name, **params)
+        native.call = lost_reply
+        env = Rekordbox(native, library(), effects_enabled=True)
+        with self.assertRaisesRegex(RuntimeError, 'reply lost'):
+            await env.execute(decision(transport='echo_A'), env.snapshot(frame))
+        current = await env.observe()
+        self.assertGreater(current['effects']['cooldown_seconds'], 44)
+        self.assertNotIn('echo_A', policy.prepare(current)['questions']['transport']['criteria'])
+        with self.assertRaises(LocalPreDispatch):
+            await env.execute(decision(transport='echo_A'), current)
+        self.assertEqual([name for _, name, _ in native.physical], ['echoAccent'])
