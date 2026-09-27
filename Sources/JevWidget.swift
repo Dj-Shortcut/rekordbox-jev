@@ -61,6 +61,7 @@ private final class Monitor: ObservableObject {
     @Published var pinned = true
     @Published var sessionAction = ""
     @Published var sessionPhase = ""
+    @Published var sessionRunID = ""
     let root: URL
     private var timer: Timer?
     private var lastNewest = ""
@@ -70,7 +71,13 @@ private final class Monitor: ObservableObject {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval:0.2, repeats:true) { [weak self] _ in self?.refresh() }
     }
-    var selected: Run? { runs.first(where:{$0.id == selectedID}) }
+    var selected: Run? {
+        let run = runs.first(where:{$0.id == selectedID})
+        // History stays inspectable when frozen, but an earlier session's
+        // answer must not appear as the current session's decision.
+        if followLatest && !sessionRunID.isEmpty && run?.id.hasPrefix(sessionRunID+"-") != true { return nil }
+        return run
+    }
     func refresh() {
         let evidence = root.appendingPathComponent("evidence")
         if let status = readObject(evidence.appendingPathComponent("dj-session-status.json")) {
@@ -81,6 +88,7 @@ private final class Monitor: ObservableObject {
             if let title = status["title"] as? String { message += " · " + title }
             if sessionAction != message { sessionAction = message }
             if sessionPhase != string(status["status"]) { sessionPhase = string(status["status"]) }
+            if sessionRunID != string(status["run_id"]) { sessionRunID = string(status["run_id"]) }
         }
         let events = evidence.appendingPathComponent("jev-events")
         let files = ((try? FileManager.default.contentsOfDirectory(at:events,includingPropertiesForKeys:nil)) ?? [])
@@ -330,11 +338,11 @@ private struct Inspector: View {
         if readOnly { return "Voorbeeld" }
         if !monitor.followLatest { return "Beeldpauze" }
         if monitor.sessionPhase == "preparing" && probe.running { return "Voorbereiden" }
-        if probe.running && monitor.sessionPhase.contains("blocked") { return "Onderbroken" }
+        if monitor.sessionPhase.contains("blocked") { return "Onderbroken" }
         return probe.running ? "Live" : probe.connected ? "Verbonden" : "Niet verbonden"
     }
     private var liveTint: Color {
-        probe.running && monitor.sessionPhase.contains("blocked") ? .orange : probe.connected && monitor.followLatest ? mint : muted
+        monitor.sessionPhase.contains("blocked") ? .orange : probe.connected && monitor.followLatest ? mint : muted
     }
     private func resumeFollowing() {
         monitor.followLatest = true
@@ -456,7 +464,8 @@ private struct Inspector: View {
                 }
             }
             if monitor.sessionPhase.contains("blocked") || (!probe.status.isEmpty && probe.status != "DJ Jev gestopt · muziek blijft spelen") {
-                Text(probe.status.isEmpty ? monitor.sessionAction : probe.status)
+                Text(monitor.sessionPhase.contains("blocked") && !probe.busy ? monitor.sessionAction :
+                     probe.status.isEmpty ? monitor.sessionAction : probe.status)
                     .font(.system(size:11)).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)
             }
         }
@@ -742,6 +751,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             record("five",6,"answered")
             model.refresh()
             precondition(model.selectedID == "five")
+            let sessionStatus = root.appendingPathComponent("evidence/dj-session-status.json")
+            try! JSONSerialization.data(withJSONObject:["run_id":"new-session","status":"preparing",
+                "message":"DJ Jev starten…"]).write(to:sessionStatus,options:.atomic)
+            model.refresh()
+            precondition(model.selected == nil, "Starting a new session must hide old answers even without new event files")
+            try! JSONSerialization.data(withJSONObject:["run_id":"new-session","status":"blocked",
+                "message":"Runner onverwacht gestopt"]).write(to:sessionStatus,options:.atomic)
+            model.refresh()
+            precondition(model.sessionPhase == "blocked" && model.sessionAction == "Runner onverwacht gestopt")
+            precondition(model.selected == nil, "An early crash cannot resurrect an earlier session's answer")
+            record("new-session-1",7,"answered")
+            model.refresh()
+            precondition(model.selected?.id == "new-session-1")
             print("Widget monitor: live antwoorden, wachtende aanvraag, leespauze en geschiedenis gecontroleerd.")
             return
         }

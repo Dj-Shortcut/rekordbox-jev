@@ -38,7 +38,11 @@ class Display:
         supplied = os.environ.get('DJ_JEV_SESSION_ID')
         self.run_id=str(uuid.UUID(supplied)) if supplied else str(uuid.uuid4())
         self.directory=ROOT/'evidence'/self.run_id
-        self.directory.mkdir(parents=True)
+        # The signed host reserves this UUID directory before spawning Python.
+        # Accept that empty directory, but never overwrite an earlier session.
+        self.directory.mkdir(parents=True, exist_ok=bool(supplied))
+        if any(self.directory.iterdir()):
+            raise FileExistsError('De sessiemap bevat al bewijs; start een nieuwe sessie.')
         self.requests={}
         self.error=None
         self.started=time.time()

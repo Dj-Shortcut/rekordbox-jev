@@ -152,6 +152,12 @@ final class DJSessionHost {
         let runID = UUID().uuidString.lowercased()
         let sessionDirectory = root.appendingPathComponent("demo/evidence/"+runID)
         try FileManager.default.createDirectory(at:sessionDirectory,withIntermediateDirectories:true)
+        // Claim the visible session before Python starts. Otherwise an early
+        // crash is discarded by publishFault as belonging to an older session.
+        let statusURL = URL(fileURLWithPath:socketDirectory+"/widget/evidence/dj-session-status.json")
+        try FileManager.default.createDirectory(at:statusURL.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try JSONSerialization.data(withJSONObject:["run_id":runID,"event":"starting",
+            "status":"preparing","message":"DJ Jev starten…"]).write(to:statusURL,options:.atomic)
         let task = Process()
         let python = ["/opt/homebrew/bin/python3","/usr/local/bin/python3","/usr/bin/python3"].first {
             FileManager.default.isExecutableFile(atPath:$0)
