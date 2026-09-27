@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # demo/djjev uses asyncio.timeout, which needs Python 3.11+.
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Actieve DJ Jev-kern (demo/)
+        working-directory: demo
+        run: python -m unittest discover -s tests -v
+      - name: Oudere bridge- en scripttests
+        run: python -m unittest discover -s tests -v
+
+  macos:
+    # Tests guarded by sys.platform == 'darwin' (such as the Swift/AppKit
+    # marker-alignment matcher) are skipped on Ubuntu; run them natively here.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Swift-toolchain
+        run: swiftc --version
+      - name: Actieve DJ Jev-kern (demo/)
+        working-directory: demo
+        run: python -m unittest discover -s tests -v
+      - name: Bridge- en scripttests inclusief Swift marker-alignment
+        # Explicit bash enables pipefail, so a failing suite is not masked by tee.
+        shell: bash
+        run: python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+      - name: Controleer dat de Swift marker-alignmenttest echt draaide
+        shell: bash
+        run: grep -E "^test_marker_alignment_cases .* ok$" "$RUNNER_TEMP/test-output.txt"

@@ -95,10 +95,18 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await client.close()
 
     async def test_request_timeout_allows_fresh_next_request_without_overlapping_posts(self):
+        # Like a real socket, the slow reply only ends when the timeout drops
+        # the connection; a fixed sleep made the next request's budget depend
+        # on sleep precision, which failed on slower macOS runners.
+        released = threading.Event()
         class Slow(Connection):
             def getresponse(self):
-                time.sleep(.075)
-                return super().getresponse()
+                if not released.wait(1):
+                    raise AssertionError('timed-out socket was not interrupted')
+                raise OSError('interrupted socket')
+            def close(self):
+                super().close()
+                released.set()
         first, second = Slow([Response()]), Connection([Response()])
         connections = iter((first, second))
         client = JevClient('private-fixture-key', timeout=.05,
@@ -107,6 +115,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             await client.ask(REQUEST)
         self.assertFalse(client._closed)
         self.assertTrue(first.closed)
+        client.timeout = 1.
         result = await client.ask(REQUEST)
         self.assertEqual(result['answers'], BODY['answers'])
         self.assertEqual(len(first.requests), 1)
