@@ -20,6 +20,41 @@ import Darwin
         do { _ = try MixGestureSpec(request); return false } catch { return true }
     }
     static func main() async throws {
+        func token(_ text:String, _ x:CGFloat, _ y:CGFloat, _ width:CGFloat) -> TextToken {
+            TextToken(text:text,confidence:1,rect:CGRect(x:x,y:y,width:width,height:12))
+        }
+        let browserHeaders = [token("Titel van muziekstuk",420,456,126),token("Artiest",756,456,44),token("BPM",962,456,30)]
+        let browserTokens = browserHeaders + [token("Home (Extended Mix)",418,478,150),token("Marsh",756,478,40),
+            token("Another Track",418,500,130),token("Home (Extended Mix)",756,500,150)]
+        check(browserTitleTokens(browserTokens).map(\.text) == ["Home (Extended Mix)","Another Track"],
+              "Moved title column must not search the artist column, even when an artist matches the target")
+        check(browserTitleTokens(browserTokens.filter{$0.text != "Titel van muziekstuk"}).isEmpty,
+              "Missing title header cannot fall back to calibrated artist coordinates")
+        check(browserTitleColumn(browserTokens+[token("Title",550,456,40)]) == nil,
+              "Ambiguous title headers must fail closed")
+        let shifted = [token("Title",552,456,40),token("Artist",897,456,40),token("Target",550,500,100)]
+        check(browserTitleTokens(shifted).map(\.text) == ["Target"],"Earlier column layout still resolves from its headers")
+        let dynamicRegion = loadBrowserRowRegion(browserTokens[3].rect,column:browserTitleColumn(browserTokens))
+        check(dynamicRegion.minX < 418 && dynamicRegion.maxX < 756,"Row OCR and selection stay inside the observed title column")
+        if let index = CommandLine.arguments.firstIndex(of:"--browser-columns-fixture"), index+1 < CommandLine.arguments.count {
+            let image = NSBitmapImageRep(data:try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[index+1])))!.cgImage!
+            let (full,fast) = try await Task.detached {
+                let full = try recognizeObservationTokens(image,mixerOnly:false)
+                return (full,try recognizeObservationTokens(image,mixerOnly:true))
+            }.value
+            let titles = browserTitleTokens(full).map(\.text)
+            print("Observed fixture title column: \(String(describing:browserTitleColumn(full))); titles: \(titles)")
+            fflush(stdout)
+            check(titles.contains("Bright Lights Fading (Death in vegas Remix)") && !titles.contains("Slam"),
+                  "Actual failing browser screenshot resolves titles instead of artists")
+            func folder(_ tokens:[TextToken]) -> [String] {
+                tokens.filter{loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY))}.map(\.text)
+            }
+            print("Observed fixture folders: full=\(folder(full)), fast=\(folder(fast))")
+            fflush(stdout)
+            check(folder(full) == ["26"] && folder(fast) == ["26"],"Full and fast captures retain the same proven folder identity")
+            print("PASS actual browser-column and fast-folder screenshot regression")
+        }
         check(observationHasInputBudget(sampledAt:0,now:600_000_000,reserveNS:150_000_000),
               "EQ guard retains the full 150 ms input reserve at its boundary")
         check(!observationHasInputBudget(sampledAt:0,now:600_000_001,reserveNS:150_000_000),
@@ -678,6 +713,21 @@ import Darwin
         }
         try FileManager.default.removeItem(at:stopFlag)
         try requireLiveControlRequest(liveRequest)
+        let sessionID = UUID().uuidString.lowercased()
+        let scopedRequest: [String:Any] = ["clientPID":getpid(),"clientSessionID":sessionID]
+        let sessionStop = URL(fileURLWithPath:socketDirectory+"/stop-\(getpid())-"+sessionID)
+        try Data().write(to:sessionStop)
+        defer { try? FileManager.default.removeItem(at:sessionStop) }
+        do {
+            try requireLiveControlRequest(scopedRequest)
+            check(false,"A stopped session must reject input")
+        } catch { check(String(describing:error).contains("Stop gevraagd"),"Session stop must reject before input") }
+        try requireLiveControlRequest(["clientPID":getpid(),"clientSessionID":UUID().uuidString])
+        check(true,"A reused PID with a new session UUID must not inherit a stale stop")
+        do {
+            try requireLiveControlRequest(["clientPID":getpid(),"clientSessionID":"invalid"])
+            check(false,"Malformed session must not fall back to PID-only checks")
+        } catch { check(String(describing:error).contains("Ongeldige sessie"),"Reject malformed session identity") }
         check(socketPath.hasSuffix("/"+nativeProcessRole.socketFile),"Process must use its isolated role socket")
         if isControlWorker {
             for command in ["djReady","djAuthorize","djStart","djStop"] {

@@ -264,6 +264,10 @@ private enum JevProbeSocket {
         guard let active = initial["autonomousMixing"] as? Bool else {
             throw JevProbeError("De processtatus is onbekend; geen tweede set gestart.")
         }
+        guard let digest = Bundle.main.object(forInfoDictionaryKey:"JevSourceDigest") as? String,
+              initial["sourceDigest"] as? String == digest else {
+            throw JevProbeError("Widget en draaiende Bridge verschillen; sluit de oude apps en open deze build opnieuw.")
+        }
         // Reopening the widget attaches to the running set, without another start.
         if active { return false }
         // Only the explicit Start click may request the normal Keychain dialog.

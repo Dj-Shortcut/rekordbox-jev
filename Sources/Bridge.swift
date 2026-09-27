@@ -238,7 +238,14 @@ func requireLiveControlRequest(_ request: [String:Any]) throws {
     }
     guard let supplied = request["clientPID"] else { return }
     guard let pid = supplied as? Int32, pid > 1 else { throw BridgeError("Ongeldige aanvrager; geen bediening.") }
-    guard !FileManager.default.fileExists(atPath:socketDirectory+"/stop-\(pid)") else {
+    var stopPath = socketDirectory+"/stop-\(pid)"
+    if let suppliedSession = request["clientSessionID"] {
+        guard let session = suppliedSession as? String, let uuid = UUID(uuidString:session) else {
+            throw BridgeError("Ongeldige sessie; geen bediening.")
+        }
+        stopPath += "-"+uuid.uuidString.lowercased()
+    }
+    guard !FileManager.default.fileExists(atPath:stopPath) else {
         throw BridgeError("Stop gevraagd; geen verdere bediening uitgevoerd.")
     }
     guard kill(pid,0) == 0 || errno == EPERM else {
@@ -261,6 +268,8 @@ func status() -> [String: Any] {
             "autonomousMixing": isControlWorker ? false : DJSessionHost.shared.running,
             "controlWorker":isControlWorker,"demoRole":nativeProcessRole.demoName as Any? ?? NSNull(),
             "readOnly":nativeProcessRole == .demoObserver, "protocolVersion": 3, "bridgePID": getpid(),
+            "sourceCommit":Bundle.main.object(forInfoDictionaryKey:"JevSourceCommit") as? String ?? "unknown",
+            "sourceDigest":Bundle.main.object(forInfoDictionaryKey:"JevSourceDigest") as? String ?? "unknown",
             "contextualTransport": ["version":2,"emptyDeckLoad":true,"replaceStoppedLoad":true,"replaceStopped":true,"desiredPlayback":true,"folder26":true],
             "nativeMixGuards":["version":1,"freshAlignmentBeforeInput":true,"typedPreDispatchRejections":true,
                                "expectedTracksAndDeadline":true,"mixStep":true,"mixGesture":true,"closeStoppedDeck":true,"openSilentDeck":true], "inlineMixerObservation":true]
@@ -317,6 +326,7 @@ let observationBPMCrops = [CGRect(x:484,y:298,width:57,height:20),CGRect(x:743,y
 let observationBPMCache = ObservationTextCache(regions:observationBPMCrops)
 let observationMetadataCrops = [CGRect(x:45,y:193,width:435,height:20),CGRect(x:731,y:193,width:435,height:20)]
 let observationBrowserCrop = CGRect(x:0,y:400,width:1272,height:355)
+let observationFolderCache = ObservationTextCache(regions:[loadBrowserHeadingRegion])
 
 func recognizeTextRegion(_ image: CGImage, _ area: CGRect) throws -> [TextToken] {
     guard let input = image.cropping(to:area) else { throw BridgeError("OCR-uitsnede is ongeldig.") }
@@ -345,6 +355,20 @@ func recognizeObservationTokens(_ image: CGImage, mixerOnly: Bool) throws -> [Te
     var tokens = mixerOnly && knownSize ? [] : try recognize(knownSize ? observationBrowserCrop :
         CGRect(x:0,y:0,width:image.width,height:image.height))
     if knownSize {
+        // Recovery also checks folder identity. Fast reads must carry freshly
+        // validated folder pixels, not an absent heading or a stale full read.
+        let observedFolder = tokens.filter { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
+        tokens.removeAll { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
+        if let folder = observationFolderCache.tokens(for:image) { tokens += folder }
+        else {
+            // Vision misses the bare two-digit heading in a tiny isolated crop.
+            // Use the proven browser context on a cache miss, then reuse only
+            // after exact heading-pixel comparison against every fresh frame.
+            let folder = (mixerOnly ? try recognize(observationBrowserCrop) : observedFolder)
+                .filter { loadBrowserHeadingRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
+            observationFolderCache.store(folder,image:image)
+            tokens += folder
+        }
         tokens.removeAll { observationHeaderRegion.contains(CGPoint(x:$0.rect.midX,y:$0.rect.midY)) }
         if let header = observationHeaderCache.tokens(for:image) { tokens += header }
         else {
@@ -659,7 +683,20 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
         DJSessionHost.shared.stop()
         return ["stopRequested":true]
     case "activate":
-        try app().activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        let rekordbox = try app()
+        _ = rekordbox.activate(options:[.activateAllWindows])
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != rekordbox.processIdentifier,
+           let url = rekordbox.bundleURL {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            let _: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
+                NSWorkspace.shared.openApplication(at:url,configuration:config) { application,error in
+                    if let error { continuation.resume(throwing:error) }
+                    else if let application { continuation.resume(returning:application) }
+                    else { continuation.resume(throwing:BridgeError("Focusherstel niet bevestigd.")) }
+                }
+            }
+        }
         return ["activationRequested":true]
     case "quit":
         if !isControlWorker { DJSessionHost.shared.stop() }

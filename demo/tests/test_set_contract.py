@@ -206,8 +206,8 @@ class FixtureChoices:
 
 
 class FullSetContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fixture_answers_drive_two_handoffs_and_prepare_a_third_without_external_nudges(self):
-        native=StrictNativeFixture();env=Rekordbox(native,tracks());client=FixtureChoices();events=[]
+    async def exercise(self, native=None, *, unverified_loads=0, observation_errors=0):
+        native=native or StrictNativeFixture();env=Rekordbox(native,tracks());client=FixtureChoices();events=[]
         runner=Runner(env,policy,client,events.append,tick_interval=.001,observe_interval=.002,decision_interval=.002)
         task=asyncio.create_task(runner.run())
         def finished():
@@ -217,7 +217,8 @@ class FullSetContractTests(unittest.IsolatedAsyncioTestCase):
         try:
             async def wait_for_outcome():
                 while not finished() and not runner.blocked:
-                    failures=[e for e in events if e['event']=='error']
+                    failures=[e for e in events if e['event']=='error' and
+                              (e.get('stage')!='observe' or not observation_errors)]
                     if failures:self.fail(str(failures[-1]))
                     await asyncio.sleep(.002)
             await asyncio.wait_for(wait_for_outcome(),5)
@@ -234,7 +235,7 @@ class FullSetContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('align_A',choices);self.assertIn('align_B',choices)
         self.assertEqual(choices[-1],'prepare_A')
         self.assertGreaterEqual(choices.count('load_A'),2)
-        self.assertGreaterEqual(choices.count('load_B'),2)
+        self.assertGreaterEqual(choices.count('load_B'),2-unverified_loads)
         for index,e in enumerate(mixes):
             s=e['result']['snapshot'];target=e['decision']['crossfader']
             self.assertTrue(s['mixer']['aligned']);self.assertTrue(s['decks'][target]['eq_neutral']['low'])
@@ -259,6 +260,34 @@ class FullSetContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(e['request_id'] in answered for e in verified))
         self.assertTrue(native.stopped);self.assertTrue(client.closed)
         self.assertTrue(all(e['response']['model']=='fixture-no-inference' for e in events if e['event']=='answer'))
+        self.assertEqual(sum(e['event']=='error' and e.get('stage')=='observe' for e in events),observation_errors)
+
+    async def test_fixture_answers_drive_two_handoffs_and_prepare_a_third_without_external_nudges(self):
+        await self.exercise()
+
+    async def test_two_handoffs_survive_observer_outage_and_lost_load_reply(self):
+        """Production orchestration recovers using fixture answers, never replaying a load."""
+        from djjev.health import NativeConnectionError
+        native = StrictNativeFixture()
+        original = native.call
+        failures = set()
+        native.generation = 0
+        async def failing_call(role, name, **parameters):
+            if name == 'observe' and 'observe' not in failures:
+                failures.add('observe')
+                native.generation += 1
+                raise NativeConnectionError(role, name, False, ConnectionRefusedError())
+            result = await original(role, name, **parameters)
+            if name == 'loadChosenTrack' and 'load' not in failures:
+                failures.add('load')
+                raise NativeConnectionError(role, name, True, ConnectionResetError())
+            return result
+        native.call = failing_call
+        await self.exercise(native, unverified_loads=1, observation_errors=1)
+        self.assertEqual(failures, {'observe','load'})
+        # A failed reply for the first load does not cause the same track to be loaded twice.
+        loaded = [params['file'] for name,params in native.calls if name == 'loadChosenTrack']
+        self.assertEqual(len(loaded),len(set(loaded)))
 
 
 if __name__=='__main__':unittest.main()

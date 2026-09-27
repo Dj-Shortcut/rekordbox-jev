@@ -1,28 +1,14 @@
-# Credential-host compatibility entry; the new demo imports no legacy DJ code.
+# Legacy trial module. The active set always uses the canonical session entry.
 if __name__ == '__main__':
-    import sys as _demo_sys
-    import json as _demo_json
-    import pathlib as _demo_paths
-    _demo_root = _demo_paths.Path(__file__).resolve().parents[1]
-    _demo_config = _demo_root / 'config/live_trial.json'
-    if (_demo_config.exists() and _demo_json.loads(_demo_config.read_text()).get('implementation') == 'doom_demo'
-            and '--dj-test' in _demo_sys.argv and '--legacy-control' not in _demo_sys.argv):
-        import fcntl as _demo_fcntl
-        with (_demo_root / 'evidence/jev-reactive.lock').open('w') as _demo_lock:
-            _demo_fcntl.flock(_demo_lock, _demo_fcntl.LOCK_EX | _demo_fcntl.LOCK_NB)
-            if '--key-stdin' not in _demo_sys.argv:
-                raise SystemExit('Start DJ Jev via de widget; geen nieuwe sleutel nodig.')
-            _demo_key = _demo_sys.stdin.readline(4098).rstrip('\r\n')
-            if not _demo_key or len(_demo_key)>4096 or any(ord(c)<32 for c in _demo_key):
-                raise SystemExit('De bestaande sleutel is niet beschikbaar.')
-            _demo_source = _demo_root / 'demo'
-            if not (_demo_source / 'djjev/main.py').is_file():
-                _demo_source = _demo_root.parent / 'dj-jev-demo'
-            _demo_sys.path.insert(0,str(_demo_source))
-            from djjev.main import run as _demo_run
-            _demo_result = _demo_run(_demo_key)
-            print(_demo_json.dumps(_demo_result,ensure_ascii=False),flush=True)
-            raise SystemExit(0)
+    import sys
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads((root/'config/live_trial.json').read_text())
+    if config.get('implementation') == 'doom_demo' and '--dj-test' in sys.argv:
+        from run_session import main
+        sys.argv = [sys.argv[0], '--key-stdin'] if '--key-stdin' in sys.argv else [sys.argv[0]]
+        raise SystemExit(main())
 
 #!/usr/bin/env python3
 """Short closed-loop Jev trial: observe -> choose one control -> apply -> observe."""

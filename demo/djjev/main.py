@@ -8,6 +8,8 @@ import signal
 import time
 import uuid
 from . import policy
+from .evidence import SessionEvidence
+from .build_info import validate_installation
 from .environment import Rekordbox, BRIDGE
 from .jev_client import JevClient
 from .runner import Runner
@@ -33,14 +35,21 @@ def atomic(path,data):
 class Display:
     def __init__(self,key):
         self.key=key
-        self.run_id=str(uuid.uuid4())
+        supplied = os.environ.get('DJ_JEV_SESSION_ID')
+        self.run_id=str(uuid.UUID(supplied)) if supplied else str(uuid.uuid4())
         self.directory=ROOT/'evidence'/self.run_id
-        self.directory.mkdir(parents=True)
+        # The signed host reserves this UUID directory before spawning Python.
+        # Accept that empty directory, but never overwrite an earlier session.
+        self.directory.mkdir(parents=True, exist_ok=bool(supplied))
+        if any(self.directory.iterdir()):
+            raise FileExistsError('De sessiemap bevat al bewijs; start een nieuwe sessie.')
         self.requests={}
         self.error=None
         self.started=time.time()
         self.last_snapshot=0
         self.blocked=False
+        self.evidence = SessionEvidence(self.directory, self.run_id, key)
+        self.evidence_fault = False
 
     def clean(self,value):
         if isinstance(value,str):return value.replace(self.key,'[verborgen]')
@@ -49,7 +58,8 @@ class Display:
         return value
 
     def status(self,message,**extra):
-        atomic(DISPLAY/'dj-session-status.json',{'message':message,'event':'demo','status':'running',**extra})
+        atomic(DISPLAY/'dj-session-status.json',{'message':message,'event':'demo','status':'running',
+            'run_id':self.run_id, 'build':self.evidence.state['build'], **extra})
 
     def __call__(self,event):
         event=self.clean(event)
@@ -60,8 +70,11 @@ class Display:
                 self.status('Rekordbox opnieuw uitlezen · '+str(event['snapshot'].get('error','onbekende toestand')))
             # Requests already record the exact compact audio evidence Jev saw.
             event['snapshot']={k:v for k,v in event['snapshot'].items() if k not in ('library','audio_windows')}
-        with (self.directory/'events.jsonl').open('a') as file:
-            file.write(json.dumps(event,ensure_ascii=False,allow_nan=False)+'\n')
+        try:
+            self.evidence.record(event)
+        except OSError:
+            self.evidence_fault = True
+            raise
         if name=='started':self.status('DJ Jev · Rekordbox uitlezen')
         if name=='request':
             payload=event['request']
@@ -80,6 +93,8 @@ class Display:
         if name in ('dispatch','verified','ignored','execution_deferred','execution_reconciling','execution_reconciled','error'):
             record=self.requests.get(event.get('request_id'))
             if record:
+                if name == 'ignored' and record.get('status') == 'pending':
+                    record.update(status='cancelled', finished_at=time.time())
                 # Keep execution evidence attached to its own request; the
                 # global session banner may already describe a newer decision.
                 record['execution']={'status':name,'updated_at':time.time(),
@@ -90,7 +105,7 @@ class Display:
                     record['execution'].update(verified=result.get('verified') is True,
                         dispatched=result.get('dispatched') is True)
                 atomic(DISPLAY/'jev-events'/(record['id']+'.json'),record)
-        if name in ('dispatch','verified'):
+        if name in ('dispatch','verified') and not self.blocked:
             d=event['decision']; labels=[]
             if d.get('transport')!='hold':labels.append(LABELS.get(d['transport'],d['transport']))
             if d.get('crossfader')!='hold':labels.append('Fader naar '+d['crossfader'])
@@ -104,19 +119,33 @@ class Display:
         if name in ('execution_reconciling','execution_reconciled'):
             self.status(str(event['message']))
         if name=='error':
+            was_blocked = self.blocked
             self.blocked = self.blocked or event.get('blocked') is True
-            self.error=event.get('error') or event.get('message') or event.get('reason') or event.get('error_type')
+            if not was_blocked:
+                self.error=event.get('error') or event.get('message') or event.get('reason') or event.get('error_type')
             self.status(('Bediening onderbroken · ' if event.get('blocked') else 'Opnieuw waarnemen · ')+str(self.error),
                 status='blocked' if event.get('blocked') else 'running')
-        if name=='stopped':self.status('DJ Jev gestopt · muziek blijft spelen',status='stopped')
+        if name=='stopped':
+            self.status('Bediening onderbroken · '+str(self.error) if self.blocked else
+                        'DJ Jev gestopt · muziek blijft spelen', status='blocked' if self.blocked else 'stopped')
 
 
 async def session(key):
     display=Display(key);env=Rekordbox(library=[],native_trace=display);client=JevClient(key)
     runner=Runner(env,policy,client,display)
+    async def heartbeat():
+        while True:
+            try:
+                display.evidence.heartbeat()
+            except OSError:
+                display.evidence_fault = True
+                runner.request_stop()
+            await asyncio.sleep(1)
+    heartbeat_task=asyncio.create_task(heartbeat())
     loop=asyncio.get_running_loop()
     for sig in (signal.SIGINT,signal.SIGTERM):loop.add_signal_handler(sig,runner.request_stop)
     try:
+        display.evidence.state['build'] = validate_installation(BRIDGE)
         await env.start()
         preparation=asyncio.create_task(prepare_library(env.native,display,root=ROOT,bridge=BRIDGE))
         stopped=asyncio.create_task(runner._stop_event.wait())
@@ -141,9 +170,13 @@ async def session(key):
         display({'event':'error','stage':'startup','blocked':True,'error':str(error)})
         await env.stop();await client.close()
         result={'blocked':True,'error':display.error}
+    heartbeat_task.cancel()
+    await asyncio.gather(heartbeat_task,return_exceptions=True)
+    if display.evidence_fault:
+        result.update(blocked=True, error='Sessielog kon niet worden bewaard; bediening gestopt.')
     result.update(run_id=display.run_id,duration_seconds=time.time()-display.started,
                   evidence_directory=str(display.directory),last_error=display.error)
-    atomic(display.directory/'result.json',display.clean(result))
+    display.evidence.finish(result)
     return result
 
 

@@ -19,13 +19,14 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>DJ Jev</string>
 <key>CFBundleExecutable</key><string>jev-widget</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>16</string>
-<key>CFBundleShortVersionString</key><string>0.8.1</string>
+<key>CFBundleVersion</key><string>17</string>
+<key>CFBundleShortVersionString</key><string>0.9.0</string>
 <key>CFBundleIconFile</key><string>dj-jev</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><false/>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+python3 "$project_dir/scripts/build_info.py" "$app_dir"
 python3 "$project_dir/scripts/sign_app.py" "$app_dir" local.rekordbox.jev-widget
 echo "$app_dir"

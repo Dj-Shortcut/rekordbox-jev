@@ -127,6 +127,7 @@ final class DJSessionHost {
     static let shared = DJSessionHost()
     private let credentials = DJCredentialAccess()
     private var process: Process?
+    private var processSessionID: String?
     var running: Bool { process?.isRunning == true }
     var credentialReadiness: [String:Bool] { credentials.readiness() }
 
@@ -140,22 +141,67 @@ final class DJSessionHost {
         guard !running else { throw BridgeError("Er draait al een DJ-sessie.") }
         guard let secret = credentials.cachedSecret() else { throw BridgeError("Geen sleutel beschikbaar.") }
         let root = Bundle.main.bundleURL.deletingLastPathComponent()
+        let configuration = try Data(contentsOf:root.appendingPathComponent("config/live_trial.json"))
+        let manifestData = try Data(contentsOf:root.appendingPathComponent("build-info.json"))
+        guard let config = try JSONSerialization.jsonObject(with:configuration) as? [String:Any],
+              config["implementation"] as? String == "doom_demo",
+              let manifest = try JSONSerialization.jsonObject(with:manifestData) as? [String:Any],
+              manifest["source_digest"] as? String == Bundle.main.object(forInfoDictionaryKey:"JevSourceDigest") as? String,
+              manifest["protocol"] as? Int == 3 else {
+            throw BridgeError("Startconfiguratie en Bridge-build verschillen; bouw beide apps opnieuw.")
+        }
+        let runID = UUID().uuidString.lowercased()
+        let sessionDirectory = root.appendingPathComponent("demo/evidence/"+runID)
+        try FileManager.default.createDirectory(at:sessionDirectory,withIntermediateDirectories:true)
+        // Claim the visible session before Python starts. Otherwise an early
+        // crash is discarded by publishFault as belonging to an older session.
+        let statusURL = URL(fileURLWithPath:socketDirectory+"/widget/evidence/dj-session-status.json")
+        try FileManager.default.createDirectory(at:statusURL.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try JSONSerialization.data(withJSONObject:["run_id":runID,"event":"starting",
+            "status":"preparing","message":"DJ Jev starten…"]).write(to:statusURL,options:.atomic)
         let task = Process()
         let python = ["/opt/homebrew/bin/python3","/usr/local/bin/python3","/usr/bin/python3"].first {
             FileManager.default.isExecutableFile(atPath:$0)
         }!
         task.executableURL = URL(fileURLWithPath:python)
-        task.arguments = [root.appendingPathComponent("scripts/jev_reactive.py").path,"--key-stdin","--dj-test"]
+        task.arguments = [root.appendingPathComponent("scripts/run_session.py").path,"--key-stdin"]
         task.currentDirectoryURL = root
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey:"TYPESAFE_API_KEY")
+        environment["DJ_JEV_SESSION_ID"] = runID
         task.environment = environment
         let input = Pipe(), output = Pipe()
         task.standardInput = input; task.standardOutput = output; task.standardError = output
-        try task.run(); process = task
+        try task.run(); process = task; processSessionID = runID
+        let supervisor = DispatchQueue(label:"local.rekordbox.session."+runID)
+        let watchdog = DispatchSource.makeTimerSource(queue:supervisor)
+        let started = Date().timeIntervalSince1970
+        watchdog.schedule(deadline:.now()+2,repeating:2)
+        watchdog.setEventHandler {
+            guard task.isRunning else { return }
+            let checkpoint = Self.readObject(sessionDirectory.appendingPathComponent("session.json"))
+            let last = checkpoint["heartbeat_at"] as? Double ?? started
+            guard Date().timeIntervalSince1970-last > 30 else { return }
+            Self.fence(task.processIdentifier, runID:runID)
+            Self.publishFault(runID:runID, message:"Runner reageert niet; bediening onderbroken.")
+            Self.writeObject(["event":"runner_unresponsive","time":Date().timeIntervalSince1970,
+                              "runner_pid":task.processIdentifier],
+                             to:sessionDirectory.appendingPathComponent("host-fault.json"))
+            task.interrupt()
+            watchdog.cancel()
+        }
+        watchdog.resume()
         // No credential in argv, environment, output, or disk files.
-        try input.fileHandleForWriting.write(contentsOf:Data((secret+"\n").utf8))
-        try input.fileHandleForWriting.close()
+        do {
+            try input.fileHandleForWriting.write(contentsOf:Data((secret+"\n").utf8))
+            try input.fileHandleForWriting.close()
+        } catch {
+            Self.fence(task.processIdentifier, runID:runID)
+            task.interrupt()
+            watchdog.cancel()
+            try? input.fileHandleForWriting.close()
+            throw BridgeError("Sessie-invoer niet bevestigd; runner onderbroken.")
+        }
         DispatchQueue.global(qos:.utility).async {
             var tail = Data()
             while true {
@@ -165,13 +211,50 @@ final class DJSessionHost {
                 if tail.count > 131072 { tail = Data(tail.suffix(65536)) }
             }
             task.waitUntilExit()
+            // Fence even an unexpected exit before accepting another session.
+            Self.fence(task.processIdentifier, runID:runID)
+            watchdog.cancel()
             let text = (String(data:tail,encoding:.utf8) ?? "").replacingOccurrences(of:secret,with:"[verborgen]")
-            let result:[String:Any] = ["exitCode":task.terminationStatus,"output":text,"finishedAt":Date().timeIntervalSince1970]
+            let result:[String:Any] = ["run_id":runID,"exitCode":task.terminationStatus,"output":text,"finishedAt":Date().timeIntervalSince1970]
+            Self.writeObject(result,to:sessionDirectory.appendingPathComponent("host-result.json"))
+            let recorded = Self.readObject(sessionDirectory.appendingPathComponent("result.json"))
+            if recorded["completed"] as? Bool != true {
+                let failure:[String:Any] = ["run_id":runID,"completed":false,"blocked":true,
+                    "status":"interrupted","reason":"runner_exited_without_result", "host":result]
+                Self.writeObject(failure,to:sessionDirectory.appendingPathComponent("result.json"))
+                Self.publishFault(runID:runID,message:"Runner onverwacht gestopt; bediening onderbroken · muziek blijft spelen")
+            }
             let path = root.appendingPathComponent("evidence/native-session-result.json")
             if let data = try? JSONSerialization.data(withJSONObject:result,options:.prettyPrinted) {
                 try? data.write(to:path,options:.atomic)
             }
         }
     }
-    func stop() { if running { process?.interrupt() } }
+    private static func readObject(_ url:URL) -> [String:Any] {
+        guard let data = try? Data(contentsOf:url),
+              let value = try? JSONSerialization.jsonObject(with:data) as? [String:Any] else { return [:] }
+        return value
+    }
+    private static func writeObject(_ value:[String:Any], to url:URL) {
+        if let data = try? JSONSerialization.data(withJSONObject:value,options:.sortedKeys) {
+            try? data.write(to:url,options:.atomic)
+        }
+    }
+    private static func fence(_ pid:pid_t, runID:String) {
+        let url = URL(fileURLWithPath:socketDirectory+"/stop-\(pid)-"+runID)
+        try? Data().write(to:url,options:.atomic)
+    }
+    private static func publishFault(runID:String, message:String) {
+        let url = URL(fileURLWithPath:socketDirectory+"/widget/evidence/dj-session-status.json")
+        let current = readObject(url)
+        // A delayed exit report must not overwrite a newer session's status.
+        if let active = current["run_id"] as? String, active != runID { return }
+        writeObject(["run_id":runID,"event":"error","status":"blocked","message":message],to:url)
+    }
+    func stop() {
+        if let current = process, current.isRunning, let runID = processSessionID {
+            Self.fence(current.processIdentifier, runID:runID)
+            current.interrupt()
+        }
+    }
 }
