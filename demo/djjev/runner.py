@@ -10,7 +10,7 @@ import time
 
 from .events import emit
 from .state import ENDPOINT_TOLERANCE, number
-from .recovery import MixReadbackIncomplete, mixer_state
+from .recovery import MixReadbackIncomplete, mixer_state, control_state, same_control_state
 
 
 class Runner:
@@ -119,6 +119,7 @@ class Runner:
             for n,d in snapshot['decks'].items()}} if overlap and type(stamp) is int else None)
 
     def _remember_verified(self, context, result):
+        """Record confirmed actions and update transition timing."""
         decision=context['decision'];control=decision.get('transport')
         if control!='hold':
             self.meaningful_actions.append({k:deepcopy(decision[k]) for k in
@@ -126,23 +127,12 @@ class Runner:
             self.meaningful_actions=self.meaningful_actions[-12:]
         if str(control).startswith('load_') and isinstance(decision.get('track_id'),str):
             self.recent_tracks=(self.recent_tracks+[decision['track_id']])[-12:]
-        before=context.get('before_snapshot');after=result.get('snapshot')
+        after=result.get('snapshot')
         self._invalidate_transition(after)
         if self.transition and control in ('align_A','align_B'):
             self.transition.pop('audible_mix_started_ns',None)
             self._overlap_observation=None
-        identity=self._identities(before)
-        if (control in ('play_A','play_B') and identity is not None
-                and identity==self._identities(after) and all(v['track_id'] for v in identity.values())):
-            incoming=control[-1];outgoing='B' if incoming=='A' else 'A'
-            inc=before['decks'][incoming];out=before['decks'][outgoing]
-            cross=before.get('mixer',{}).get('cross')
-            muted=number(cross,0,1) and (cross>=1-ENDPOINT_TOLERANCE if incoming=='A' else cross<=ENDPOINT_TOLERANCE)
-            if (muted and inc.get('playing') is False and out.get('playing') is True
-                    and number(out.get('channel'),.9,1)
-                    and all(after['decks'][n].get('playing') is True for n in ('A','B'))):
-                self.transition={'incoming':incoming,'outgoing':outgoing,'identities':identity,
-                    'source':'verified_silent_successor_start', 'started_snapshot_version':before.get('version')}
+        self._remember_launch(context, after, source='verified_silent_successor_start')
         if self.transition and self._identities(after)==self.transition['identities'] and control!='hold':
             self.transition['last_verified_action']=control
             if control=='mix':
@@ -163,12 +153,40 @@ class Runner:
                         self.transition.setdefault('audible_mix_started_ns',stamp)
                         break
 
+    def _remember_launch(self, context, after, *, source):
+        """Retain observed successor roles without claiming execution verification."""
+        control = context['decision'].get('transport')
+        before = context.get('before_snapshot')
+        identity=self._identities(before)
+        if (control in ('play_A','play_B') and identity is not None
+                and identity==self._identities(after) and all(v['track_id'] for v in identity.values())):
+            incoming=control[-1];outgoing='B' if incoming=='A' else 'A'
+            inc=before['decks'][incoming];out=before['decks'][outgoing]
+            cross=before.get('mixer',{}).get('cross')
+            muted=number(cross,0,1) and (cross>=1-ENDPOINT_TOLERANCE if incoming=='A' else cross<=ENDPOINT_TOLERANCE)
+            if (muted and inc.get('playing') is False and out.get('playing') is True
+                    and number(out.get('channel'),.9,1)
+                    and all(after['decks'][n].get('playing') is True for n in ('A','B'))):
+                self.transition={'incoming':incoming,'outgoing':outgoing,'identities':identity,
+                    'source':source, 'started_snapshot_version':before.get('version')}
+
+    def _retire_pending_request(self):
+        """Cancel an obsolete request; drain it before allowing a fresh request."""
+        if self._api_task is not None and not self._api_task.done():
+            self._api_task.cancel()
+
+    def _reset_reconciliation_streak(self):
+        """Require consecutive readable observations, even across read failures."""
+        if self._reconciliation is not None:
+            self._reconciliation.update(last_key=None, stable=0)
+
     async def _observe(self):
         started = self.clock()
         result = await self.env.observe()
         return started, result
 
     def _observe_done(self):
+        """Consume a read and advance recovery only on consecutive stable controls."""
         task, self._observe_task = self._observe_task, None
         try:
             started, snapshot = task.result()
@@ -179,21 +197,17 @@ class Runner:
             self.emit('snapshot', snapshot=self.latest, valid=self.valid(snapshot), seconds=self.clock()-started)
             if self._reconciliation is not None and started >= self._last_actuation_end:
                 reconciliation = self._reconciliation
-                if self.valid(snapshot):
-                    identities = self._identities(snapshot)
-                    if identities is None:
-                        # Test doubles and degraded observations may not expose
-                        # decks; production observations always use identities.
-                        key = (snapshot.get('title'), snapshot.get('folder'))
-                    else:
-                        key = identities
-                    if key == reconciliation['last_key']:
+                key = control_state(snapshot)
+                if key is not None:
+                    if same_control_state(reconciliation['last_key'], key):
                         reconciliation['stable'] += 1
                     else:
-                        reconciliation['last_key'] = deepcopy(key)
                         reconciliation['stable'] = 1
+                    reconciliation['last_key'] = key
                     reconciliation['reads'] += 1
                     if reconciliation['stable'] >= 2:
+                        self._remember_launch(reconciliation['context'], snapshot,
+                                              source='observed_silent_successor_start')
                         self._reconciliation = None
                         self.emit('execution_reconciled', request_id=reconciliation['request_id'],
                                   message='Toestand opnieuw bevestigd; Jev kiest vanaf deze stand.',
@@ -204,7 +218,7 @@ class Runner:
                         self.emit('error', stage='recovery', reason='state_not_stable',
                                   message='Toestand bleef na bediening onduidelijk; bediening onderbroken.')
                 else:
-                    reconciliation['reads'] += 1
+                    self._reset_reconciliation_streak()
             if self._recovery is not None and started >= self._last_actuation_end:
                 recovery = self._recovery
                 positions = mixer_state(snapshot, recovery['titles'])
@@ -233,6 +247,9 @@ class Runner:
             pass
         except Exception as error:
             self.latest = None
+            self._reset_reconciliation_streak()
+            if self._recovery is not None:
+                self._recovery['positions'] = None
             self.emit('error', stage='observe', error_type=type(error).__name__, message=str(error))
 
     def _begin_reconciliation(self, context, *, message, error_type=None):
@@ -243,6 +260,7 @@ class Runner:
         stable state and ask Jev again.  Replaying the old relative gesture is
         explicitly forbidden.  A bounded failure still ends in blocked state.
         """
+        self._retire_pending_request()
         self._reconciliation_failures += 1
         if self._reconciliation_failures >= 3:
             self.blocked = True
@@ -250,7 +268,7 @@ class Runner:
                       request_id=context['request_id'], error_type=error_type,
                       message='Meerdere bedieningen konden niet worden bevestigd; bediening onderbroken.')
             return
-        self._reconciliation = {'request_id': context['request_id'],
+        self._reconciliation = {'request_id': context['request_id'], 'context': deepcopy(context),
                                 'last_key': None, 'stable': 0, 'reads': 0,
                                 'deadline': self.clock()+8}
         self.emit('execution_reconciling', request_id=context['request_id'],
@@ -258,6 +276,7 @@ class Runner:
                   partial=True, verified=False)
 
     def _actuator_done(self):
+        """Classify completion before allowing any new physical decision."""
         task, self._actuator_task = self._actuator_task, None
         context, self._actuator_context = self._actuator_context, None
         self.busy = False
@@ -266,13 +285,16 @@ class Runner:
         try:
             result = task.result()
             if not isinstance(result, dict) or result.get('verified') is not True:
+                if context['decision'].get('transport') == 'mix':
+                    raise RuntimeError('Mixresultaat mist bevestigde begrensde herstelgegevens.')
                 self._begin_reconciliation(
                     context, message='Bediening niet bevestigd; Rekordbox opnieuw uitlezen.',
                     error_type='execution_unconfirmed')
                 return
             self.history.append({'decision': context['decision'], 'verified': True, 'time': self.clock()})
             self._remember_verified(context,result)
-            self._reconciliation_failures = 0
+            if result.get('dispatched') is True and context['decision'].get('transport') != 'hold':
+                self._reconciliation_failures = 0
             self.verified_decisions += 1
             self.verified_actions += result.get('dispatched') is True
             if context['decision'].get('transport') == 'mix' and result.get('dispatched') is True:
@@ -289,6 +311,7 @@ class Runner:
                     and self._mix_recovery_count < 2
                     and self._identities(error.snapshot) == self._identities(context['before_snapshot'])
                     and mixer_state(error.snapshot, context['decision']['expected_titles']) is not None):
+                self._retire_pending_request()
                 self._mix_recovery_count += 1
                 self._recovery = {'titles':context['decision']['expected_titles'],
                     'identities':self._identities(error.snapshot), 'positions':None, 'reads':0,
@@ -308,7 +331,7 @@ class Runner:
                           decision=context['decision'], commands_sent=False,
                           dispatched=False, retryable=True)
                 return
-            if type(error) is MixReadbackIncomplete:
+            if context['decision'].get('transport') == 'mix' or type(error) is MixReadbackIncomplete:
                 # A mix gesture with partial/contradictory readback has a
                 # dedicated bounded recovery path above. If it did not meet
                 # that path's strict identity and mixer guards, do not let the

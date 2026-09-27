@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -111,6 +112,40 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first.requests), 1)
         self.assertEqual(len(second.requests), 1)
         await client.close()
+
+    async def test_cancelled_request_drops_socket_but_allows_a_fresh_request(self):
+        """Retiring a busy answer interrupts its socket without closing the client."""
+        entered = threading.Event(); released = threading.Event()
+        class Blocked(Connection):
+            def getresponse(self):
+                entered.set()
+                if not released.wait(.5):
+                    raise AssertionError('socket was not interrupted')
+                raise OSError('cancelled socket')
+            def close(self):
+                super().close()
+                released.set()
+        first, second = Blocked([]), Connection([Response()])
+        connections = iter((first, second))
+        client = JevClient('private-fixture-key', connection_factory=lambda *a, **k: next(connections))
+        pending = asyncio.create_task(client.ask(REQUEST))
+        try:
+            async def wait_for_post():
+                while not entered.is_set():
+                    await asyncio.sleep(.001)
+            await asyncio.wait_for(wait_for_post(), .3)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+            self.assertTrue(first.closed)
+            self.assertFalse(client._closed)
+            result = await asyncio.wait_for(client.ask(REQUEST), .3)
+            self.assertEqual(result['answers'], BODY['answers'])
+            self.assertEqual(len(second.requests), 1)
+        finally:
+            await client.close()
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
 
 
 if __name__ == '__main__':

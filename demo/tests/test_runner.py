@@ -30,7 +30,9 @@ class Environment:
     async def observe(self):
         self.observations += 1
         await asyncio.sleep(.001)
-        return {'valid': True, 'version': self.title, 'title': self.title, 'observation': self.observations}
+        frame = dj_snapshot()
+        frame['decks']['A']['title'] = self.title
+        return {**frame, 'version': self.title, 'title': self.title, 'observation': self.observations}
 
     async def execute(self, decision, snapshot):
         assert not self.stopped
@@ -142,21 +144,29 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.executions, 0)
 
     async def test_partial_unverified_execution_reconciles_before_new_decision(self):
+        """Recovery must dispatch a fresh decision against the changed observation."""
         env = Environment(); env.result = {'verified': False, 'dispatched': True, 'partial': True}
         original_execute = env.execute
-        calls = [0]
+        decisions = []
+        failed_at = []
         async def fail_once_then_verify(decision, snapshot):
-            calls[0] += 1
-            if calls[0] == 1:
-                result = await original_execute(decision, snapshot)
-                return result
-            return {'verified': True, 'dispatched': True}
+            """Apply both decisions, changing the observed track after uncertainty."""
+            decisions.append(deepcopy(decision))
+            result = await original_execute(decision, snapshot)
+            if len(decisions) == 1:
+                env.title = 'B'
+                failed_at.append(env.observations)
+                env.result = {'verified': True, 'dispatched': True}
+            return result
         env.execute = fail_once_then_verify
         runner, env, client, events = self.create(env=env)
         task = asyncio.create_task(runner.run())
         await until(lambda: runner.verified_actions >= 1)
         self.assertFalse(runner.blocked)
-        self.assertGreaterEqual(calls[0], 2)
+        self.assertGreaterEqual(env.executions, 2)
+        self.assertEqual(decisions[0]['expected_titles'], 'A')
+        self.assertEqual(decisions[1]['expected_titles'], 'B')
+        self.assertGreater(env.dispatch_observations[1], failed_at[0])
         self.assertTrue(any(e['event'] == 'execution_reconciling' for e in events))
         self.assertTrue(any(e['event'] == 'execution_reconciled' for e in events))
         await asyncio.wait_for(runner.stop(), .05)
@@ -164,9 +174,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(env.stopped)
 
     async def test_unstable_reconciliation_eventually_blocks_without_replaying(self):
+        """Changing post-action identities exhaust recovery without a second action."""
         class Unstable(Environment):
             async def observe(self):
-                self.title = 'A' if self.observations % 2 else 'B'
+                """Keep dispatch deterministic; vary tracks only during recovery."""
+                if self.executions >= 1:
+                    self.title = 'A' if self.observations % 2 else 'B'
                 return await super().observe()
         env = Unstable(); env.result = {'verified': False, 'dispatched': True, 'partial': True}
         runner, env, client, events = self.create(env=env)
@@ -219,6 +232,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await runner.stop(); await task
 
     async def test_partial_or_unknown_errors_never_qualify_for_native_safe_retry(self):
+        """Ambiguous errors use bounded reconciliation, never a zero-input retry."""
         cases = [
             {},
             {'retryable': True},

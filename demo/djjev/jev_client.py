@@ -121,7 +121,8 @@ class JevClient:
             except asyncio.CancelledError:
                 # A cancelled to_thread call may still be in the socket. Shut it
                 # down and forbid another request using that same connection.
-                await self.close()
+                self._generation += 1
+                self._drop()
                 raise
             except TimeoutError:
                 self._generation += 1

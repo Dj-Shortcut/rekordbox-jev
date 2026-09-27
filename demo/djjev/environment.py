@@ -403,10 +403,13 @@ class Rekordbox:
                         or any(not number(x['remaining'],20.001) for x in state['decks'].values() if x['playing'])
                         or not number(deck['remaining'],20.001) or not number(deck['bpm'],60,200)):
                     reject_state('Geen ruimte voor een subtiel effect op dit deck.')
-                result=await command('echoAccent',deck=n,bpm=deck['bpm'])
+                try:
+                    result=await command('echoAccent',deck=n,bpm=deck['bpm'])
+                finally:
+                    # A lost reply cannot prove that this transient effect never ran.
+                    self.last_effect_ns=time.monotonic_ns()
                 if result.get('verified') is not True or result.get('effectOffVerified') is not True:
                     raise RuntimeError('Echo of automatisch uitschakelen niet bevestigd.')
-                self.last_effect_ns=time.monotonic_ns()
             elif kind=='stop':
                 state=await fresh()
                 remaining=state['decks'][d]['remaining']
