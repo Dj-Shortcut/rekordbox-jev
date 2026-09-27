@@ -23,6 +23,7 @@ class EvidenceTests(unittest.TestCase):
             checkpoint = json.loads((root/'session.json').read_text())
             self.assertIsNone(checkpoint['last_command']['input_sent'])
             self.assertFalse(checkpoint['last_command']['verified'])
+            self.assertTrue(checkpoint['last_command']['possibly_partial'])
             evidence.record({'event':'native_command','phase':'error','command':'mixGesture',
                              'message':'private-key','flags':{'commands_sent':True}})
             evidence.record({'event':'bridge_status','role':'observer','status':{'bridgePID':42}})

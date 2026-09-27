@@ -36,7 +36,7 @@ def native_parameters(parameters):
     result = _scalars(parameters, ('deck', 'incoming', 'outgoing', 'action', 'expectedTrack',
         'expectedOtherTrack', 'playing', 'endOnly', 'replaceStopped', 'allowSilentReplacement',
         'file', 'band', 'pixels', 'bassPixels', 'crossfader', 'value', 'durationSeconds',
-        'bpm', 'cueOffsetSeconds'))
+        'bpm', 'cueOffsetSeconds', 'importFolder26'))
     if isinstance(parameters.get('bands'), list):
         result['bands'] = [band for band in parameters['bands'] if band in ('low', 'mid', 'high', 'trim')]
     return result

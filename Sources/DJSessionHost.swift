@@ -127,6 +127,7 @@ final class DJSessionHost {
     static let shared = DJSessionHost()
     private let credentials = DJCredentialAccess()
     private var process: Process?
+    private var processSessionID: String?
     var running: Bool { process?.isRunning == true }
     var credentialReadiness: [String:Bool] { credentials.readiness() }
 
@@ -171,7 +172,7 @@ final class DJSessionHost {
         task.environment = environment
         let input = Pipe(), output = Pipe()
         task.standardInput = input; task.standardOutput = output; task.standardError = output
-        try task.run(); process = task
+        try task.run(); process = task; processSessionID = runID
         let supervisor = DispatchQueue(label:"local.rekordbox.session."+runID)
         let watchdog = DispatchSource.makeTimerSource(queue:supervisor)
         let started = Date().timeIntervalSince1970
@@ -181,7 +182,7 @@ final class DJSessionHost {
             let checkpoint = Self.readObject(sessionDirectory.appendingPathComponent("session.json"))
             let last = checkpoint["heartbeat_at"] as? Double ?? started
             guard Date().timeIntervalSince1970-last > 30 else { return }
-            Self.fence(task.processIdentifier)
+            Self.fence(task.processIdentifier, runID:runID)
             Self.publishFault(runID:runID, message:"Runner reageert niet; bediening onderbroken.")
             Self.writeObject(["event":"runner_unresponsive","time":Date().timeIntervalSince1970,
                               "runner_pid":task.processIdentifier],
@@ -195,7 +196,7 @@ final class DJSessionHost {
             try input.fileHandleForWriting.write(contentsOf:Data((secret+"\n").utf8))
             try input.fileHandleForWriting.close()
         } catch {
-            Self.fence(task.processIdentifier)
+            Self.fence(task.processIdentifier, runID:runID)
             task.interrupt()
             watchdog.cancel()
             try? input.fileHandleForWriting.close()
@@ -211,7 +212,7 @@ final class DJSessionHost {
             }
             task.waitUntilExit()
             // Fence even an unexpected exit before accepting another session.
-            Self.fence(task.processIdentifier)
+            Self.fence(task.processIdentifier, runID:runID)
             watchdog.cancel()
             let text = (String(data:tail,encoding:.utf8) ?? "").replacingOccurrences(of:secret,with:"[verborgen]")
             let result:[String:Any] = ["run_id":runID,"exitCode":task.terminationStatus,"output":text,"finishedAt":Date().timeIntervalSince1970]
@@ -239,8 +240,8 @@ final class DJSessionHost {
             try? data.write(to:url,options:.atomic)
         }
     }
-    private static func fence(_ pid:pid_t) {
-        let url = URL(fileURLWithPath:socketDirectory+"/stop-\(pid)")
+    private static func fence(_ pid:pid_t, runID:String) {
+        let url = URL(fileURLWithPath:socketDirectory+"/stop-\(pid)-"+runID)
         try? Data().write(to:url,options:.atomic)
     }
     private static func publishFault(runID:String, message:String) {
@@ -251,8 +252,8 @@ final class DJSessionHost {
         writeObject(["run_id":runID,"event":"error","status":"blocked","message":message],to:url)
     }
     func stop() {
-        if let current = process, current.isRunning {
-            Self.fence(current.processIdentifier)
+        if let current = process, current.isRunning, let runID = processSessionID {
+            Self.fence(current.processIdentifier, runID:runID)
             current.interrupt()
         }
     }

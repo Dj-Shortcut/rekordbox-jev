@@ -62,7 +62,7 @@ class SessionEvidence:
             summary = event.get('result', {})
             self.state['last_command'] = {**event, 'input_sent': summary.get('commandsSent', summary.get('dispatched', event.get('flags', {}).get('commands_sent'))),
                 'partial': summary.get('partial'),
-                'possibly_partial': event.get('phase') != 'started' and summary.get('verified') is not True,
+                'possibly_partial': summary.get('verified') is not True,
                 'verified': summary.get('verified') is True}
         if name == 'snapshot' and event.get('valid') is True:
             self.state['last_observation'] = {'time': event.get('time', time.time()),

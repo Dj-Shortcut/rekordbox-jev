@@ -238,7 +238,14 @@ func requireLiveControlRequest(_ request: [String:Any]) throws {
     }
     guard let supplied = request["clientPID"] else { return }
     guard let pid = supplied as? Int32, pid > 1 else { throw BridgeError("Ongeldige aanvrager; geen bediening.") }
-    guard !FileManager.default.fileExists(atPath:socketDirectory+"/stop-\(pid)") else {
+    var stopPath = socketDirectory+"/stop-\(pid)"
+    if let suppliedSession = request["clientSessionID"] {
+        guard let session = suppliedSession as? String, let uuid = UUID(uuidString:session) else {
+            throw BridgeError("Ongeldige sessie; geen bediening.")
+        }
+        stopPath += "-"+uuid.uuidString.lowercased()
+    }
+    guard !FileManager.default.fileExists(atPath:stopPath) else {
         throw BridgeError("Stop gevraagd; geen verdere bediening uitgevoerd.")
     }
     guard kill(pid,0) == 0 || errno == EPERM else {

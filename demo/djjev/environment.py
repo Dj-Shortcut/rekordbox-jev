@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import time
+import uuid
 from .state import normalize, read_library, number, closed, cross_closed, ENDPOINT_TOLERANCE
 from .events import emit, native_parameters, native_result_summary, snapshot_summary
 from .audio_timeline import TimelineStore
@@ -63,10 +64,12 @@ def native_result(reply):
 
 class Native:
     """Own Bridge roles; recover only after the role lock proves no worker remains."""
-    def __init__(self, *, sockets=SOCKETS, bridge=BRIDGE, trace=None, clock=time.monotonic):
+    def __init__(self, *, sockets=SOCKETS, bridge=BRIDGE, trace=None, clock=time.monotonic, session_id=None):
         self.children = []
         self.sockets, self.bridge, self.trace, self.clock = sockets, bridge, trace, clock
-        self.cancel = sockets / f'stop-{os.getpid()}'
+        self.session_id = str(uuid.UUID(session_id or os.environ.get('DJ_JEV_SESSION_ID') or str(uuid.uuid4())))
+        self.cancel = sockets / f'stop-{os.getpid()}-{self.session_id}'
+        self.command_sequence = 0
         # A host Stop may arrive before Python has installed its signal handlers.
         # Never erase that fence during startup.
         self.stopping = self.cancel.exists()
@@ -82,6 +85,32 @@ class Native:
         self._health_lock = asyncio.Lock()
 
     async def call(self, role, command, **parameters):
+        # These controls run before/outside Rekordbox.execute's traced wrapper.
+        if command not in ('activate', 'refreshLibrary'):
+            return await self._call(role, command, **parameters)
+        self.command_sequence += 1
+        trace = {'command_id':f'native-{self.command_sequence}', 'command':command,
+                 'role':role, 'parameters':native_parameters(parameters)}
+        emit(self.trace, 'native_command', phase='started', **trace)
+        if getattr(self.trace, 'evidence_fault', False):
+            raise HealthBlocked('evidence_unavailable', 'Sessielog niet schrijfbaar; geen invoer verstuurd.')
+        started = time.monotonic()
+        try:
+            result = await self._call(role, command, **parameters)
+        except asyncio.CancelledError:
+            emit(self.trace, 'native_command', phase='cancelled', seconds=time.monotonic()-started, **trace)
+            raise
+        except Exception as error:
+            flags = {key:getattr(error,key) for key in ('commands_sent','dispatched','retryable')
+                     if type(getattr(error,key,None)) is bool}
+            emit(self.trace, 'native_command', phase='error', seconds=time.monotonic()-started,
+                 error_type=type(error).__name__, message=str(error), flags=flags, **trace)
+            raise
+        emit(self.trace, 'native_command', phase='returned', seconds=time.monotonic()-started,
+             result=native_result_summary(result), **trace)
+        return result
+
+    async def _call(self, role, command, **parameters):
         """Send once; a failed or cancelled reply never retries the command."""
         if (self.stopping or role == 'control' and self.control_inhibited) and command not in ('status', 'quit'):
             raise HealthBlocked('stopped', 'Stop gevraagd; geen verdere bediening.')
@@ -90,26 +119,29 @@ class Native:
             sent = False
             timeout = (90 if command == 'refreshLibrary' else 60 if command == 'loadChosenTrack'
                        else 8 if command == 'observe' else 2 if command == 'status' else 25)
+            async def exchange():
+                nonlocal writer, sent
+                reader, writer = await asyncio.open_unix_connection(
+                    str(self.sockets / f'demo-{role}.sock'), limit=4_000_000)
+                if (self.stopping or role == 'control' and self.control_inhibited) and command not in ('status', 'quit'):
+                    raise HealthBlocked('stopped', 'Stop gevraagd; geen verdere bediening.')
+                payload = json.dumps({'command': command, 'clientPID': os.getpid(),
+                                     'clientSessionID':self.session_id, **parameters},
+                                     allow_nan=False).encode()+b'\n'
+                # Conservatively mark input possible before writing any bytes.
+                sent = True
+                writer.write(payload)
+                await writer.drain()
+                line = await reader.readline()
+                if not line.endswith(b'\n'):
+                    raise ValueError('incomplete native reply')
+                reply = json.loads(line)
+                if not isinstance(reply, dict):
+                    raise ValueError('invalid native reply')
+                return native_result(reply)
             try:
-                async with asyncio.timeout(timeout):
-                    reader, writer = await asyncio.open_unix_connection(
-                        str(self.sockets / f'demo-{role}.sock'), limit=4_000_000)
-                    if (self.stopping or role == 'control' and self.control_inhibited) and command not in ('status', 'quit'):
-                        raise HealthBlocked('stopped', 'Stop gevraagd; geen verdere bediening.')
-                    payload = json.dumps({'command': command, 'clientPID': os.getpid(), **parameters},
-                                         allow_nan=False).encode()+b'\n'
-                    # Conservatively mark input possible before writing any bytes.
-                    sent = True
-                    writer.write(payload)
-                    await writer.drain()
-                    line = await reader.readline()
-                    if not line.endswith(b'\n'):
-                        raise ValueError('incomplete native reply')
-                    reply = json.loads(line)
-                    if not isinstance(reply, dict):
-                        raise ValueError('invalid native reply')
-                    return native_result(reply)
-            except (OSError, ValueError, KeyError, TimeoutError) as error:
+                return await asyncio.wait_for(exchange(), timeout)
+            except (OSError, ValueError, KeyError, asyncio.TimeoutError) as error:
                 self._last_health = float('-inf')
                 raise NativeConnectionError(role, command, sent, error) from error
             finally:
@@ -117,7 +149,7 @@ class Native:
                     writer.close()
                     try:
                         await asyncio.wait_for(writer.wait_closed(), .2)
-                    except (OSError, TimeoutError):
+                    except (OSError, asyncio.TimeoutError):
                         pass
 
     def role_free(self, role):
@@ -161,18 +193,39 @@ class Native:
             env=environment, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
         self.children.append((role, child))
-        deadline = self.clock()+8
-        while not self.stopping and self.clock() < deadline:
-            try:
-                status = self.validate_status(role, await self.call(role, 'status'))
-                if not initial:
-                    self.generation += 1
-                return status
-            except NativeConnectionError:
-                if child.returncode is not None:
-                    raise HealthBlocked('bridge_start_failed', f'{role} kon niet starten.')
-                await asyncio.sleep(.1)
-        raise HealthBlocked('bridge_start_timeout', f'{role} werd niet tijdig bereikbaar.')
+        validated = False
+        try:
+            deadline = self.clock()+8
+            while not self.stopping and self.clock() < deadline:
+                try:
+                    status = self.validate_status(role, await self.call(role, 'status'))
+                    if status['bridgePID'] != child.pid:
+                        raise HealthBlocked('bridge_owner_mismatch', 'Onverwacht Bridge-proces; bediening niet gestart.')
+                    validated = True
+                    if not initial:
+                        self.generation += 1
+                    return status
+                except NativeConnectionError:
+                    if child.returncode is not None:
+                        raise HealthBlocked('bridge_start_failed', f'{role} kon niet starten.')
+                    await asyncio.sleep(.1)
+            raise HealthBlocked('bridge_start_timeout', f'{role} werd niet tijdig bereikbaar.')
+        finally:
+            if not validated:
+                # This owned child has only received status probes, never an
+                # authorized physical action. Retire it even if its socket hung.
+                try:
+                    if child.returncode is None:
+                        try: child.terminate()
+                        except ProcessLookupError: pass
+                    try:
+                        await asyncio.wait_for(child.wait(), 2)
+                    except asyncio.TimeoutError:
+                        try: child.kill()
+                        except ProcessLookupError: pass
+                        await asyncio.wait_for(child.wait(), 2)
+                finally:
+                    self.children.remove((role, child))
 
     @property
     def health_in_progress(self):
@@ -235,7 +288,7 @@ class Native:
                 continue
             try:
                 await asyncio.wait_for(self.call(role, 'quit'), 2)
-            except (OSError, ValueError, RuntimeError, TimeoutError):
+            except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                 pass
         # No SIGKILL: cancellation is checked before the next native input.
 

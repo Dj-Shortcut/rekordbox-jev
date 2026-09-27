@@ -678,6 +678,21 @@ import Darwin
         }
         try FileManager.default.removeItem(at:stopFlag)
         try requireLiveControlRequest(liveRequest)
+        let sessionID = UUID().uuidString.lowercased()
+        let scopedRequest: [String:Any] = ["clientPID":getpid(),"clientSessionID":sessionID]
+        let sessionStop = URL(fileURLWithPath:socketDirectory+"/stop-\(getpid())-"+sessionID)
+        try Data().write(to:sessionStop)
+        defer { try? FileManager.default.removeItem(at:sessionStop) }
+        do {
+            try requireLiveControlRequest(scopedRequest)
+            check(false,"A stopped session must reject input")
+        } catch { check(String(describing:error).contains("Stop gevraagd"),"Session stop must reject before input") }
+        try requireLiveControlRequest(["clientPID":getpid(),"clientSessionID":UUID().uuidString])
+        check(true,"A reused PID with a new session UUID must not inherit a stale stop")
+        do {
+            try requireLiveControlRequest(["clientPID":getpid(),"clientSessionID":"invalid"])
+            check(false,"Malformed session must not fall back to PID-only checks")
+        } catch { check(String(describing:error).contains("Ongeldige sessie"),"Reject malformed session identity") }
         check(socketPath.hasSuffix("/"+nativeProcessRole.socketFile),"Process must use its isolated role socket")
         if isControlWorker {
             for command in ["djReady","djAuthorize","djStart","djStop"] {

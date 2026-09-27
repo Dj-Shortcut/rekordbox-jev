@@ -61,14 +61,16 @@ async def prepare_library(native, display, *, root, bridge, music_root=None):
         with log.open('wb') as errors:
             process=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.PIPE,stderr=errors)
             completed=0;failed=[]
+            async def consume_analysis():
+                nonlocal completed
+                async for line in process.stdout:
+                    row=json.loads(line)
+                    completed+=1
+                    if row.get('status')=='unavailable':failed.append(row.get('track_id'))
+                    display.status(f'Muziekanalyse {completed}/{len(pending)}',status='preparing')
+                return await process.wait()
             try:
-                async with asyncio.timeout(600):
-                    async for line in process.stdout:
-                        row=json.loads(line)
-                        completed+=1
-                        if row.get('status')=='unavailable':failed.append(row.get('track_id'))
-                        display.status(f'Muziekanalyse {completed}/{len(pending)}',status='preparing')
-                    code=await process.wait()
+                code=await asyncio.wait_for(consume_analysis(),600)
                 if code or failed:
                     raise RuntimeError('Muziekanalyse niet voltooid; controleer de beatgrid van de nieuwe nummers in Rekordbox.')
             finally:
