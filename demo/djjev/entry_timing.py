@@ -5,6 +5,7 @@ bounded evidence and independent judgments; it never schedules native playback.
 """
 from copy import deepcopy
 from .state import number
+from .transition_budget import COMPLETION_MARGIN_SECONDS, LAUNCH_ALIGNMENT_RESERVE_SECONDS
 
 
 def activity_sections(rows):
@@ -98,13 +99,20 @@ def entry_context(snapshot, lead, incoming, preferred_seconds):
     budgets = [max(0., outgoing_budget), max(0., section_end-max(0., until))]
     if number(incoming_budget, 0):
         budgets.append(incoming_budget)
-    usable = max(0., min(budgets)-12.)
+    launch_reserve = (0. if incoming_deck.get('playing') is True
+                      else LAUNCH_ALIGNMENT_RESERVE_SECONDS)
+    usable = max(0., min(budgets)-COMPLETION_MARGIN_SECONDS-launch_reserve)
     bpm = snapshot['decks'][lead].get('bpm')
-    minimum = 8*60/bpm if number(bpm, 60, 200) else 8.
+    # Four bars of usable blend, separate from launch and final completion.
+    # A single 2/4-beat rescue gesture is not a viable planned short mix.
+    minimum = 16*60/bpm if number(bpm, 60, 200) else 16.
     base.update(status='candidate' if section_end > 0 else 'candidate_passed',
                 candidate={**candidate, 'seconds_until_start': round(max(0., until), 3),
                            'seconds_until_section_end': round(max(0., section_end), 3),
                            'overlap_budget_seconds': round(usable, 3),
+                           'completion_reserve_seconds': COMPLETION_MARGIN_SECONDS,
+                           'launch_alignment_reserve_seconds': launch_reserve,
+                           'minimum_blend_seconds': minimum,
                            'suggested_overlap_seconds': round(min(preferred_seconds, usable), 3)
                                if preferred_seconds is not None else None,
                            'enough_time_for_short_mix': usable >= minimum,
@@ -164,6 +172,12 @@ def launch_consistent(decision, timing):
         return False
     supported = (choices.get('kick_pattern') == 'plausible' and choices.get('last_section') == 'supported'
                  and choices.get('post_peak') == 'past' and choices.get('entry_fit') == 'suitable')
+    if decision.get('entry_target'):
+        # PLAY can arm an agreed future slot; target_current and native marker
+        # checks enforce the exact selected point instead of next-bar drift.
+        return supported and choices.get('arrangement_fit') != 'alternative'
     if supported and candidate and entry['status'] == 'candidate' and candidate['enough_time_for_short_mix']:
+        if timing.get('entry_grid', {}).get('selected_preference'):
+            return False  # Use an explicit slot for an otherwise supported grid.
         return candidate['seconds_until_start'] <= 0
     return (timing.get('seconds_until_fallback_launch_window') or 0) <= 0

@@ -17,6 +17,8 @@ from .audio_timeline import TimelineStore
 from .eq import BASS_TARGETS, TONE_TARGETS, position, readable
 from .recovery import MixReadbackIncomplete, reconcileable_mix, mixer_state
 from .health import HealthBlocked, NativeConnectionError, RecoveryBudget
+from .transition_budget import COMPLETION_MARGIN_SECONDS
+from .entry_grid import target_current
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT.parent if (ROOT.parent/'Sources/Bridge.swift').is_file() else ROOT.parent/'rekordbox-bridge'
@@ -353,6 +355,7 @@ class Rekordbox:
         state = snapshot
         dispatched = False
         control_attempted = False
+        blend_confirmation = None
         action_generation = self.health_generation
 
         def reject_state(message, code='state_changed'):
@@ -474,7 +477,7 @@ class Rekordbox:
 
         def check_completion_margin():
             outgoing=decision.get('completion_outgoing')
-            if outgoing not in ('A','B') or not number(state['decks'][outgoing]['remaining'],0,30):
+            if outgoing not in ('A','B') or not number(state['decks'][outgoing]['remaining'],0,COMPLETION_MARGIN_SECONDS):
                 return
             if not control_attempted:
                 reject_state('Afronden heeft nu voorrang op verdere EQ-beweging.', 'completion_margin_reached')
@@ -561,6 +564,10 @@ class Rekordbox:
                     if not number(offset,0,2):
                         reject_state('Eerste downbeat ontbreekt.')
                     incoming, outgoing = state['decks'][d], state['decks'][other]
+                    target = decision.get('entry_target') if kind == 'play' else None
+                    if target and (target.get('incoming') != d or target.get('outgoing') != other
+                                   or not target_current(target,state)):
+                        reject_state('Gekozen inzetpunt gewijzigd of gemist; nieuwe keuze nodig.', 'entry_target_expired')
                     if (not cross_closed(state,d) or not all(v['channel']>=.9 for v in state['decks'].values())
                             or incoming['sync'] is not True or outgoing['master'] is not True
                             or not all(incoming['eq_neutral'].get(b) is True for b in ('trim','high','mid'))
@@ -570,12 +577,24 @@ class Rekordbox:
                         reject_state('Inzet vereist gesloten crossfaderroute, open kanalen, neutrale trim/high/mid en bevestigde master/sync/BPM.')
                     if incoming['playing']:
                         await transport(d,False)
-                    await command('action',action=f'deck{n}.start')
-                    await confirm(lambda s: s['decks'][d]['playing'] is False
-                        and number(s['decks'][d]['elapsed'], 0, .2),
-                        'Terugkeer naar het trackbegin niet bevestigd; niet gestart.')
+                    # A prepared stopped deck already at zero needs no rewind
+                    # immediately before its chosen beat. Otherwise verify the
+                    # rewind once and never retry it to rescue a missed target.
+                    if not target or not number(incoming['elapsed'],0,.05):
+                        await command('action',action=f'deck{n}.start')
+                        await confirm(lambda s: s['decks'][d]['playing'] is False
+                            and number(s['decks'][d]['elapsed'], 0, .2),
+                            'Terugkeer naar het trackbegin niet bevestigd; niet gestart.')
+                    planned = {}
+                    if target:
+                        state = await fresh()
+                        if not target_current(target,state):
+                            reject_state('Inzetpunt tijdens voorbereiding gemist; geen verlate Play.', 'entry_target_expired')
+                        planned['targetBeatMonotonicNS'] = target['beat_monotonic_ns']
+                        planned['targetOutgoingRemainingSeconds'] = target['outgoing_remaining_at_target']
+                        planned['targetOutgoingTempoRatio'] = target['tempo_ratio']
                     await command('launchAligned',incoming=n,outgoing=3-n,
-                        bpm=float(state['decks'][other]['bpm']),cueOffsetSeconds=float(offset))
+                        bpm=float(state['decks'][other]['bpm']),cueOffsetSeconds=float(offset),**planned)
                     await confirm(lambda s: s['decks'][d]['playing'] is True, 'Inzet niet bevestigd.')
                 else:
                     state=await fresh()
@@ -636,6 +655,26 @@ class Rekordbox:
             seconds=decision.get('duration_beats',4)*60/state['decks']['A']['bpm']
             target={'A':0.,'center':.5,'B':1.}.get(cross)
             goals=BASS_TARGETS.get(bass)
+            # Open an already prepared, bass-reduced route promptly when Jev
+            # explicitly chose center. EQ work must not leave this first blend
+            # silent for an entire sequence of knob/readback operations.
+            # Unprepared routes and endpoint transfers retain their old order.
+            center_first = target == .5 and any(
+                cross_closed(state,d) and number(state['decks'][d]['bass'],-1.,-.24)
+                and all(state['decks'][d]['eq_neutral'].get(b) is True for b in ('trim','high','mid'))
+                for d in ('A','B'))
+            if center_first:
+                result=await command('mixGesture',crossfader=target,durationSeconds=max(.25,min(12.,seconds)))
+                if result.get('crossfaderVerified') is not True or abs(state['mixer']['cross']-target)>.04:
+                    raise RuntimeError('Eerste middenstand niet bevestigd; geen volgende EQ-beweging.')
+                blend_confirmation=snapshot_summary(state)
+                state=await fresh()
+                if (state['mixer']['aligned'] is not True
+                        or not all(d['playing'] is True and number(d['bpm'],60,200)
+                                   and d['channel']>=.9 for d in state['decks'].values())
+                        or abs(state['decks']['A']['bpm']-state['decks']['B']['bpm'])>.02
+                        or abs(state['mixer']['cross']-target)>.04):
+                    reject_state('Middenstand, afspelen of uitlijning gewijzigd; geen volgende EQ-beweging.')
             if goals:
                 for _ in range(20):
                     check_completion_margin()
@@ -650,7 +689,7 @@ class Rekordbox:
                         down,up=lower[0],higher[0]
                         before={d:state['decks'][d]['bass'] for d in ('A','B')}
                         paired={}
-                        if target is not None:
+                        if target is not None and not center_first:
                             fraction=min(1.,4./max(4.,max(abs(before[d]-goals[d]) for d in ('A','B'))*50))
                             paired['crossfader']=state['mixer']['cross']+(target-state['mixer']['cross'])*fraction
                         result=await command('mixGesture',outgoing=1 if down=='A' else 2,
@@ -713,7 +752,7 @@ class Rekordbox:
                         raise RuntimeError('EQ-doel niet bereikt binnen de begrensde beweging.')
                     if abs(position(state['decks'][d], band)-goal) > .1:
                         raise RuntimeError('EQ-doel niet bevestigd.')
-            if target is not None:
+            if target is not None and not center_first:
                 result=await command('mixGesture',crossfader=target,durationSeconds=max(.25,min(12.,seconds)))
                 if result.get('crossfaderVerified') is not True or abs(state['mixer']['cross']-target)>.04:
                     raise RuntimeError('Crossfaderdoel niet bevestigd.')
@@ -731,4 +770,7 @@ class Rekordbox:
                         or (goal == 0 and state['decks'][d]['eq_neutral'][band] is not True)
                         for d, goal in tone.items()):
                     raise RuntimeError('EQ-doel na de mixbeweging niet bevestigd.')
-        return {'verified':True,'dispatched':dispatched,'snapshot':state}
+        result={'verified':True,'dispatched':dispatched,'snapshot':state}
+        if blend_confirmation is not None:
+            result['blend_confirmation']=blend_confirmation
+        return result

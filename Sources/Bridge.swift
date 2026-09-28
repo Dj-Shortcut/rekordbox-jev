@@ -914,12 +914,25 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
               cueOffset.isFinite, (0...2).contains(cueOffset),
               let clientPID = request["clientPID"] as? Int32, clientPID > 1,
               let titles = request["expectedTracks"] as? [String:String] else { throw BridgeError("Ongeldige lokale startplanning.") }
+        let targetBeat = request["targetBeatMonotonicNS"] as? UInt64
+        let targetRemaining = request["targetOutgoingRemainingSeconds"] as? Double
+        let targetRatio = request["targetOutgoingTempoRatio"] as? Double
+        if request["targetBeatMonotonicNS"] != nil && targetBeat == nil {
+            throw PreDispatchRejection(code:"invalid_entry_target",description:"Ongeldig gekozen inzetpunt; niets gestart.",retryable:true)
+        }
+        if targetBeat != nil {
+            guard let remaining = targetRemaining, remaining.isFinite, remaining >= 0,
+                  let ratio = targetRatio, ratio.isFinite, (0.94...1.06).contains(ratio) else {
+                throw PreDispatchRejection(code:"invalid_entry_clock",description:"Gekozen inzetpunt mist een geldige bronklok; niets gestart.",retryable:true)
+            }
+        }
         let key = try mappings().first { $0["commandId"] == (incoming == 1 ? "3006" : "3106") }?["key"]
         guard let key else { throw BridgeError("Play-sneltoets ontbreekt.") }
         var scheduling: [[String:Any]] = []
         var sentAt: UInt64?, scheduledDue: UInt64?
         defer {
             let trace: [String:Any] = ["incoming":incoming,"outgoing":outgoing,
+                "targetBeatMonotonicNS":targetBeat as Any? ?? NSNull(),
                 "expectedTracks":titles,"attempts":scheduling,
                 "commandsSent":NativeInputScope.progress?.sent ?? false,
                 "sentAtMonotonicNS":sentAt as Any? ?? NSNull(),
@@ -933,13 +946,42 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
                   (1...2).allSatisfy({deckTitle(frame,$0) == titles[String($0)]}) else {
                 throw BridgeError("Starttoestand gewijzigd.")
             }
+            if let target = targetBeat, let remaining = targetRemaining, let ratio = targetRatio {
+                let metadata = frame.text(in:outgoing == 1
+                    ? CGRect(x:45,y:193,width:435,height:20)
+                    : CGRect(x:731,y:193,width:435,height:20))
+                let expected = remaining+(Double(target)-Double(frame.sampledAt))/1e9*ratio
+                guard let observed = nativeRemainingSeconds(metadata:metadata),
+                      abs(observed-expected) <= 0.35 else {
+                    throw PreDispatchRejection(code:"entry_clock_changed",description:"Bronpositie gewijzigd of niet leesbaar; gekozen inzet geannuleerd.",retryable:true)
+                }
+            }
             let vision = MixerVision(bitmap:NSBitmapImageRep(cgImage:frame.image))
             guard let cross = vision.crossfader, outgoing == 1 ? cross < 0.04 : cross > 0.96 else {
                 throw BridgeError("Binnenkomend deck moet onhoorbaar zijn voor lokaal geplande start.")
             }
         }
         do {
-            sentAt = try await retryUndispatchedLaunch(eventSequence:{NativeInputScope.progress?.sequence ?? 0},
+            if let target = targetBeat {
+                let now = DispatchTime.now().uptimeNanoseconds
+                let cueNS = UInt64(cueOffset*1e9)
+                guard target > now, target-now <= 10_000_000_000, target > cueNS else {
+                    throw PreDispatchRejection(code:"entry_target_expired",description:"Gekozen inzetpunt verstreken of te ver weg; nieuwe keuze nodig.",retryable:true)
+                }
+                let due = target-cueNS
+                let observeAt = due > 2_500_000_000 ? due-2_500_000_000 : 0
+                // Keep Stop, request deadline and requester liveness active
+                // while a chosen future point moves into the visible window.
+                while DispatchTime.now().uptimeNanoseconds < observeAt {
+                    try requireLiveControlRequest(request)
+                    guard kill(clientPID,0) == 0 || errno == EPERM else {
+                        throw BridgeError("Aanvrager gestopt; gekozen inzet geannuleerd.")
+                    }
+                    try await Task.sleep(nanoseconds:50_000_000)
+                }
+            }
+            sentAt = try await retryUndispatchedLaunch(maxAttempts:targetBeat == nil ? 4 : 1,
+                eventSequence:{NativeInputScope.progress?.sequence ?? 0},
                 onMiss:{attempt,miss in
                     scheduling.append(["attempt":attempt,"phase":miss.phase,"result":"missed_without_input",
                         "dueMonotonicNS":miss.dueNS,"checkedMonotonicNS":miss.checkedNS,"latenessMS":miss.latenessMS])
@@ -949,7 +991,7 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
                 try validateStart(before)
                 let markers = MixerVision(bitmap:NSBitmapImageRep(cgImage:before.image)).markers(outgoing)
                 let due = try nextLaunchDue(markers:markers,bpm:bpm,cueOffset:cueOffset,
-                    sampledAt:before.sampledAt,now:DispatchTime.now().uptimeNanoseconds)
+                    sampledAt:before.sampledAt,now:DispatchTime.now().uptimeNanoseconds,targetBeatNS:targetBeat)
                 scheduledDue = due
                 if let requestDeadline = request["notAfterMonotonicNS"] as? UInt64, due > requestDeadline {
                     throw PreDispatchRejection(code:"launch_request_deadline",description:"Volgende maatgrens valt buiten de aanvraagdeadline; niets gestart.",retryable:true)
@@ -962,6 +1004,14 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
                     try requireLiveControlRequest(request)
                     fresh = try await checkedObservation(recoverablePreDispatch:true,mixerOnly:true)
                     try validateStart(fresh)
+                    if let target = targetBeat {
+                        let markers = MixerVision(bitmap:NSBitmapImageRep(cgImage:fresh.image)).markers(outgoing)
+                        let checkedDue = try nextLaunchDue(markers:markers,bpm:bpm,cueOffset:cueOffset,
+                            sampledAt:fresh.sampledAt,now:DispatchTime.now().uptimeNanoseconds,targetBeatNS:target)
+                        guard abs(Double(checkedDue)-Double(due)) <= 80_000_000 else {
+                            throw LaunchTimingMiss(dueNS:due,checkedNS:DispatchTime.now().uptimeNanoseconds,phase:"chosen_bar_moved")
+                        }
+                    }
                     // AX can take tens of milliseconds. Do it before the final
                     // wait instead of consuming the lateness allowance after it.
                     try requireInputAccess()
@@ -988,7 +1038,9 @@ private func handleRequest(_ request: [String: Any]) async throws -> [String: An
             }
         } catch let miss as LaunchTimingMiss {
             throw PreDispatchRejection(code:"launch_deadline_missed",
-                description:"Lokale startdeadline na vier verse planningen gemist (\(Int(miss.latenessMS)) ms); geen Play verstuurd.",retryable:true)
+                description:targetBeat == nil
+                    ? "Lokale startdeadline na vier verse planningen gemist (\(Int(miss.latenessMS)) ms); geen Play verstuurd."
+                    : "Gekozen inzetpunt niet bevestigd of gemist; geen Play verstuurd en niet naar een andere maat verschoven.",retryable:true)
         }
         let after = try await observe(mixerOnly:true)
         return ["dispatched":true,"commandsSent":true,"verified":false,

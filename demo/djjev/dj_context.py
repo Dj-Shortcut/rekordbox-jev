@@ -31,7 +31,7 @@ _ROWS = (
      'Nu mengen met fader, bass, midden en hoog, of wachten; kort echo-accent; cut/loop niet beschikbaar.', 'transport,crossfader,bass,mid,high', 'partial'),
     (9, 'launch_window', 'Wanneer past het om de overgang te beginnen?',
      'Laatste aanhoudende terugkeer van lage tonen en aanvallen, hele tijdlijn, beide klokken; kicks en climax blijven vermoedens.',
-     'Kickpatroon / laatste sectie / hoogtepunt voorbij / passage geschikt; onzeker is een geldig antwoord. Mixtijd wordt berekend.', 'kick_pattern,last_section,post_peak,entry_fit,transport', 'active'),
+     'Kickpatroon / laatste sectie / hoogtepunt voorbij / passage geschikt. X-punten liggen acht beats uit elkaar; mogelijke inkomende drop en afwijkende arrangementen tellen mee. Onzeker blijft geldig.', 'kick_pattern,last_section,post_peak,entry_fit,arrangement_fit,entry_slot,transport', 'active'),
     (10, 'overlap', 'Hoe lang laat ik de nummers overlappen?',
      'Gemeten overlap, beschikbare tijd en beide muzikale passages.',
      'Overlap aanhouden / voortzetten / afronden; 32/64 maten zijn bestaande voorkeuren.', 'transport,crossfader', 'partial'),

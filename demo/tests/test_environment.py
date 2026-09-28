@@ -329,6 +329,71 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any('crossfader' in p for _,name,p in native.physical if name=='mixGesture'))
         self.assertFalse(any(name.startswith('dj') for _,name,_ in native.calls))
 
+    async def test_first_center_blend_opens_prepared_route_before_eq_on_either_deck(self):
+        for incoming in ('A','B'):
+            with self.subTest(incoming=incoming):
+                frame=both()
+                frame['mixer']['crossfader_position']=1. if incoming=='A' else 0.
+                low(frame,1 if incoming=='A' else 2,-.6)
+                result,native=await self.run_decision(frame,decision(
+                    crossfader='center',bass=incoming,mid=incoming+'_soft',duration_beats=8))
+                self.assertTrue(result['verified'])
+                first=native.physical[0]
+                self.assertEqual(first[1],'mixGesture')
+                self.assertEqual(first[2]['crossfader'],.5)
+                self.assertNotIn('bassPixels',first[2])
+                # No paired bass step or final redundant gesture repeats the fader.
+                self.assertEqual(sum('crossfader' in params for _,_,params in native.physical),1)
+                confirmed=result['blend_confirmation']
+                self.assertEqual(confirmed['mixer']['cross'],.5)
+                self.assertEqual(confirmed['decks'][incoming]['bass'],-.6)
+                self.assertLess(confirmed['captured_ns'],result['snapshot']['captured_ns'])
+                self.assertTrue(result['snapshot']['decks'][incoming]['eq_neutral']['low'])
+
+    async def test_early_center_needs_prepared_bass_and_neutral_non_bass(self):
+        for unprepared in ('bass','mid'):
+            frame=both();frame['mixer']['crossfader_position']=0.
+            if unprepared=='mid':
+                low(frame,2,-.6)
+                frame['mixer']['eq_position']['2']['mid']=-.3
+                frame['mixer']['eq_neutral']['2']['mid']=False
+            result,native=await self.run_decision(frame,decision(crossfader='center',bass='B'))
+            self.assertNotIn('blend_confirmation',result)
+            first=native.physical[0]
+            self.assertTrue(first[1]=='eq' or 'bassPixels' in first[2])
+
+    async def test_first_center_failed_readback_never_continues_to_eq(self):
+        frame=both();frame['mixer']['crossfader_position']=0.;low(frame,2,-.6)
+        native=Native(frame);original=native.call
+        async def unconfirmed(role,name,**params):
+            result=await original(role,name,**params)
+            if name=='mixGesture':result['crossfaderVerified']=False
+            return result
+        native.call=unconfirmed;env=Rekordbox(native,library())
+        with self.assertRaisesRegex(RuntimeError,'Eerste middenstand'):
+            await env.execute(decision(crossfader='center',bass='B'),env.snapshot(frame))
+        self.assertEqual(len(native.physical),1)
+
+    async def test_changed_state_after_first_center_stops_before_eq(self):
+        for changed in ('alignment','playback','cross','title'):
+            with self.subTest(changed=changed):
+                frame=both();frame['mixer']['crossfader_position']=0.;low(frame,2,-.6)
+                native=Native(frame);original=native.call;opened=False
+                async def change_after_center(role,name,**params):
+                    nonlocal opened
+                    if name=='observe' and opened:
+                        if changed=='alignment':native.raw['mixer']['red_bar_aligned']=False
+                        elif changed=='playback':native.raw['playingIndicators']['deck2']=False
+                        elif changed=='cross':native.raw['mixer']['crossfader_position']=0.
+                        else:native.raw['decks'][1]['title']='Three'
+                    result=await original(role,name,**params)
+                    if name=='mixGesture':opened=True
+                    return result
+                native.call=change_after_center;env=Rekordbox(native,library())
+                with self.assertRaises(RuntimeError):
+                    await env.execute(decision(crossfader='center',bass='B'),env.snapshot(frame))
+                self.assertEqual(len(native.physical),1)
+
     async def test_hold_does_nothing_and_cannot_carry_a_mixer_gesture(self):
         frame=both();native=Native(frame);env=Rekordbox(native,library())
         result=await env.execute(decision(transport='hold'),env.snapshot(frame))

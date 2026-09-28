@@ -560,19 +560,23 @@ func loadChosenTrack(_ request: [String:Any]) async throws -> [String:Any] {
             "search_seconds":lookupSeconds,"guardChecks":guardTrace,"after":after.json]
 }
 
-func endOnlyStopAllowed(desired: Bool, metadata: String) -> Bool {
-    guard !desired else { return false }
+func nativeRemainingSeconds(metadata: String) -> Double? {
     // Only the explicit negative remaining-time clock establishes the end.
     // Elapsed 00:00.0, BPM, pitch, missing OCR and ambiguous clocks do not.
     let expression = try! NSRegularExpression(pattern:#"(?<![0-9:])[-−]([0-9]{2,3}):([0-5][0-9])[.,]([0-9])(?![0-9:.,])"#)
     let matches = expression.matches(in:metadata,range:NSRange(metadata.startIndex...,in:metadata))
-    guard matches.count == 1, let match = matches.first else { return false }
+    guard matches.count == 1, let match = matches.first else { return nil }
     let parts = (1...3).compactMap { index -> Double? in
         guard let range = Range(match.range(at:index),in:metadata) else { return nil }
         return Double(metadata[range])
     }
-    guard parts.count == 3 else { return false }
-    return parts[0]*60+parts[1]+parts[2]/10 <= 0.1
+    guard parts.count == 3 else { return nil }
+    return parts[0]*60+parts[1]+parts[2]/10
+}
+
+func endOnlyStopAllowed(desired: Bool, metadata: String) -> Bool {
+    guard !desired, let remaining = nativeRemainingSeconds(metadata:metadata) else { return false }
+    return remaining <= 0.1
 }
 
 func setDesiredPlayback(_ request: [String:Any]) async throws -> [String:Any] {

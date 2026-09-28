@@ -84,7 +84,7 @@ class EntryTimingTests(unittest.TestCase):
         state=self.state(elapsed=360);req=policy.prepare(state)
         c=req['state']['musical_timing']['entry_preference']['candidate']
         self.assertEqual(c['position'],'within')
-        self.assertEqual(c['suggested_overlap_seconds'],36.)
+        self.assertEqual(c['suggested_overlap_seconds'],10.)
         self.assertTrue(c['requires_shorter_mix'])
         self.assertTrue(policy.applicable(self.decision(req),state))
 
@@ -92,7 +92,7 @@ class EntryTimingTests(unittest.TestCase):
         state=self.state();state['decks']['B'].update(elapsed=0,remaining=180)
         req=policy.prepare(state);timing=req['state']['musical_timing']
         self.assertEqual(timing['preferred_overlap_bars'],32)
-        self.assertEqual(timing['entry_preference']['candidate']['suggested_overlap_seconds'],36.)
+        self.assertEqual(timing['entry_preference']['candidate']['suggested_overlap_seconds'],10.)
 
     def test_too_late_candidate_does_not_trap_the_track(self):
         state=self.state(elapsed=410,start=416,end=420);req=policy.prepare(state)
@@ -122,8 +122,8 @@ class EntryTimingTests(unittest.TestCase):
         anchor=timing_fixtures.MusicalTimingTests().anchor(state)
         anchor['audible_mix_started_ns']=state['captured_ns']-5_000_000_000
         timing=policy.prepare(state,{'transition':anchor})['state']['musical_timing']
-        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],36)
-        self.assertEqual(timing['suggested_remaining_overlap_seconds'],36)
+        self.assertEqual(timing['overlap_time_available_before_finish_seconds'],18)
+        self.assertEqual(timing['suggested_remaining_overlap_seconds'],18)
 
     def test_pitch_converts_wait_and_budget_once_not_source_position(self):
         state=self.state();state['audio_windows']['A']['tempo_ratio']=1.04
@@ -131,12 +131,40 @@ class EntryTimingTests(unittest.TestCase):
         timing=policy.prepare(state)['state']['musical_timing'];c=timing['entry_preference']['candidate']
         self.assertEqual(c['start_seconds'],360)
         self.assertAlmostEqual(c['seconds_until_start'],40/1.04,places=3)
-        self.assertAlmostEqual(c['overlap_budget_seconds'],48/1.04-12,places=3)
+        self.assertAlmostEqual(c['overlap_budget_seconds'],48/1.04-30-8,places=3)
 
     def test_small_incoming_clock_limits_entry_budget(self):
         state=self.state();state['decks']['B'].update(elapsed=280,remaining=20)
         c=policy.prepare(state)['state']['musical_timing']['entry_preference']['candidate']
-        self.assertEqual(c['overlap_budget_seconds'],8)
+        self.assertEqual(c['overlap_budget_seconds'],0)
+
+    def test_smalltown_boy_return_cannot_defer_entry_into_completion_margin(self):
+        # Recorded request 490: final return at 169.485, end 200.21, track
+        # length about 204.7. Old planning advertised ~19 s of usable blend.
+        state=self.state(elapsed=160,duration=204.7,start=169.485,end=200.21)
+        request=policy.prepare(state)
+        timing=request['state']['musical_timing']
+        candidate=timing['entry_preference']['candidate']
+        self.assertEqual(candidate['overlap_budget_seconds'],0)
+        self.assertFalse(candidate['enough_time_for_short_mix'])
+        self.assertEqual(timing['seconds_until_preferred_launch_window'],0)
+        self.assertTrue(timing['ending_needs_priority'])
+        self.assertTrue(policy.applicable(self.decision(request),state))
+        # This correction must not force an early start or invent an action.
+        earlier=self.state(elapsed=100,duration=204.7,start=169.485,end=200.21)
+        req=policy.prepare(earlier)
+        self.assertFalse(req['state']['musical_timing']['ending_needs_priority'])
+        self.assertFalse(policy.applicable(self.decision(req),earlier))
+        self.assertIn('hold',req['questions']['transport']['criteria'])
+
+    def test_running_successor_does_not_pay_launch_reserve_twice(self):
+        state=self.state(elapsed=360)
+        state['decks']['B']['playing']=True
+        state['mixer'].update(cross=.5,aligned=True)
+        history={'transition':timing_fixtures.MusicalTimingTests().anchor(state)}
+        candidate=policy.prepare(state,history)['state']['musical_timing']['entry_preference']['candidate']
+        self.assertEqual(candidate['launch_alignment_reserve_seconds'],0)
+        self.assertEqual(candidate['overlap_budget_seconds'],18)
 
     def test_after_candidate_and_missing_evidence_are_explicit(self):
         state=self.state(elapsed=410);req=policy.prepare(state)

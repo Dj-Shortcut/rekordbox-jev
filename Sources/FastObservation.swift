@@ -67,7 +67,7 @@ func retryUndispatchedLaunch<T>(maxAttempts: Int = 4, eventSequence: () -> Int,
 }
 
 func nextLaunchDue(markers: [Double], bpm: Double, cueOffset: Double,
-                   sampledAt: UInt64, now: UInt64) throws -> UInt64 {
+                   sampledAt: UInt64, now: UInt64, targetBeatNS: UInt64? = nil) throws -> UInt64 {
     guard now >= sampledAt, bpm.isFinite, (60...200).contains(bpm),
           cueOffset.isFinite, (0...2).contains(cueOffset),
           markers.allSatisfy({$0.isFinite}) else { throw BridgeError("Ongeldige startplanning.") }
@@ -75,6 +75,21 @@ func nextLaunchDue(markers: [Double], bpm: Double, cueOffset: Double,
     guard gaps.count >= 2 else { throw BridgeError("Te weinig rode markeringen voor startplanning.") }
     let pixelsPerSecond = gaps[gaps.count/2]*bpm/240
     let age = Double(now-sampledAt)/1e9
+    if let target = targetBeatNS {
+        let targetOffset = (Double(target)-Double(sampledAt))/1e9
+        // OCR source position selects the intended bar; the visible marker
+        // refines timing within that SAME bar, never to a later arbitrary bar.
+        let offsets = markers.map { ($0-636)/pixelsPerSecond }
+        guard let beat = offsets.min(by:{abs($0-targetOffset)<abs($1-targetOffset)}),
+              abs(beat-targetOffset) <= 0.18,
+              beat-cueOffset-age > 0.08, beat-cueOffset-age < 4.2,
+              beat-cueOffset > 0 else {
+            let cueNS = UInt64(cueOffset*1e9)
+            throw LaunchTimingMiss(dueNS:target > cueNS ? target-cueNS : 0,
+                checkedNS:now,phase:"chosen_bar_unavailable_or_missed")
+        }
+        return sampledAt+UInt64((beat-cueOffset)*1e9)
+    }
     guard let marker = markers.first(where:{($0-636)/pixelsPerSecond-cueOffset-age > 0.08}) else {
         throw BridgeError("Geen toekomstige maatgrens zichtbaar; niets gestart.")
     }

@@ -299,6 +299,25 @@ import Darwin
         let nextMarkerDue = try nextLaunchDue(markers:[400,464,528,592,656,720,784,848],bpm:120,cueOffset:0.125,
             sampledAt:1_000_000_000,now:1_450_000_000)
         check(nextMarkerDue == 3_500_000_000,"A marker already inside the 80 ms planning margin is skipped for the next visible bar")
+        let chosenMarkerDue = try nextLaunchDue(markers:[400,464,528,592,656,720,784,848],bpm:120,cueOffset:0.125,
+            sampledAt:1_000_000_000,now:1_100_000_000,targetBeatNS:3_700_000_000)
+        check(chosenMarkerDue == 3_500_000_000,"A chosen later bar is refined by its own visible marker, not the first bar")
+        do {
+            _ = try nextLaunchDue(markers:[400,464,528,592,656,720,784,848],bpm:120,cueOffset:0.125,
+                sampledAt:1_000_000_000,now:1_480_000_000,targetBeatNS:1_625_000_000)
+            check(false,"A missed chosen marker must not roll onto the next bar")
+        } catch is LaunchTimingMiss { check(true,"A missed chosen bar cancels before Play") }
+        do {
+            _ = try nextLaunchDue(markers:[400,464,528,592,656,720,784,848],bpm:120,cueOffset:0.125,
+                sampledAt:1_000_000_000,now:1_100_000_000,targetBeatNS:2_625_000_000)
+            check(false,"A chosen time between visible bars must not invent a bar")
+        } catch is LaunchTimingMiss { check(true,"An unsupported chosen bar is rejected") }
+        check(nativeRemainingSeconds(metadata:"Artist 124.00 Am -01:40.2 03:10.0") == 100.2,
+              "Chosen entry clock reads the explicit remaining source clock")
+        check(nativeRemainingSeconds(metadata:"01:40.2 03:10.0") == nil,
+              "An unsigned clock cannot establish the chosen source position")
+        check(nativeRemainingSeconds(metadata:"-01:40.2 -03:10.0") == nil,
+              "Ambiguous remaining clocks cannot establish the chosen source position")
         var inputSequence = 8, freshnessAttempts = 0
         let eventualLoad = try await retryUndispatchedLoadInput(eventSequence:{inputSequence}) { _ in
             freshnessAttempts += 1
