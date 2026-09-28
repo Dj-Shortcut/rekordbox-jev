@@ -144,8 +144,17 @@ def attach_questions(request):
                       {'past': 'Earlier and later evidence supports a post-development interpretation; this remains an inference.',
                        'ahead': 'A substantial later development still appears to follow.',
                        'unknown': 'Measurements cannot establish where the main high point lies. A maximum RMS alone is insufficient.'}),
-        'entry_fit': ('Assuming entry at the proposed return, does this passage suit introducing the successor?',
+        'entry_fit': ('Does the proposed return suit introducing the successor, or does the CURRENT '
+                      'passage offer a supported alternative? Compare both tracks, earlier/current/later '
+                      'source measurements, their development and the incoming intro/drop when known. '
+                      'Starting an overlap is not completing the handoff. Missing a detected bass gap '
+                      'does not mean there is no musical entry. A percentage is not a musical veto. '
+                      'Do not call an arbitrary grid point or readiness alone a suitable alternative.',
                       {'suitable': 'A plausible entry without known passage conflict; shorten the blend to its computed budget.',
+                       'alternative': 'The CURRENT passage supports beginning a different blend now, '
+                                      'even without the proposed final return; both arrangements and remaining '
+                                      'time permit it without cutting off the outgoing development. '
+                                      'This is a musical judgment, not confirmed phrase detection.',
                        'protect': 'Let this passage develop further before overlapping.',
                        'unsuitable': 'This candidate is not a suitable entry.',
                        'unknown': 'Insufficient evidence; vocals and melody content are unmeasured.'}),
@@ -157,8 +166,9 @@ def attach_questions(request):
 def launch_consistent(decision, timing):
     """Reject contradictory PLAY; never substitute a fabricated model choice.
 
-    Urgency wins. Unknown structure uses the existing late-track fallback, so
-    missing semantic labels cannot trap the set in HOLD indefinitely.
+    Urgency wins. A supported alternative passage need not imitate the final
+    return template or wait for a percentage. Unknown suitability retains the
+    fallback; missing semantic labels cannot trap the set in HOLD indefinitely.
     """
     if not decision.get('transport', '').startswith('play_') or timing.get('ending_needs_priority'):
         return True
@@ -168,6 +178,14 @@ def launch_consistent(decision, timing):
     choices = {k: v.get('choice') for k, v in answers.items()}
     entry = timing['entry_preference']
     candidate = entry.get('candidate')
+    if choices.get('entry_fit') == 'alternative':
+        # Peak/final-section answers describe the proposed return, not this
+        # alternative CURRENT passage. Keep exact x-targets on their separate
+        # supported-return path; never relabel an alternative as a detected x.
+        arrangement = timing.get('arrangement', {})
+        return (not decision.get('entry_target') and bool(entry.get('evidence'))
+                and arrangement.get('incoming') is not None
+                and choices.get('arrangement_fit') in ('alternative', 'supported'))
     if choices.get('post_peak') == 'ahead' or choices.get('entry_fit') == 'protect':
         return False
     supported = (choices.get('kick_pattern') == 'plausible' and choices.get('last_section') == 'supported'
