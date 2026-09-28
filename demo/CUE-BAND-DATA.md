@@ -44,7 +44,9 @@ the operator put it, in source time, with its original identity intact.
     caller's own entry-timing policy.
   - The `TRACK` element's own `TotalTime` attribute (seconds) is read once.
     When it parses to a finite, nonnegative, plausible value
-    (`duration_status == 'known'`), any cue whose `Start` exceeds it is
+    (`duration_status == 'known'`), any cue whose `Start` exceeds it by
+    more than `DURATION_PRECISION_SECONDS` (1 s, because Rekordbox exports
+    `TotalTime` in whole seconds while `Start` is fractional) is
     rejected (`start_beyond_track_duration`) instead of being kept as if it
     were still inside the track. When `TotalTime` is absent or unusable,
     `duration_status` is `'missing'`/`'invalid'` and **no such rejection
@@ -103,7 +105,7 @@ of:
   `malformed_file_header`, `no_recognized_3band_tag`,
   `unexpected_tag_header_length`, `unexpected_entry_width`,
   `implausible_entry_count`, `entries_exceed_container`,
-  `truncated_tag_header`, `tag_length_too_small`, `tag_exceeds_container`,
+  `entry_count_mismatch`, `truncated_tag_header`, `tag_length_too_small`, `tag_exceeds_container`,
   `tag_header_length_out_of_bounds`.
 - `{'status': 'ambiguous', 'reason': 'multiple_3band_tags_present',
   'formats_found': [...]}` — more than one recognized 3-band tag is

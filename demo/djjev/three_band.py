@@ -23,7 +23,9 @@ captured file; treat them as a documented assumption, not a certainty.
 import struct
 
 FILE_MAGIC = b'PMAI'
-MIN_FILE_HEADER = 12
+# A PMAI file header is 0x1c bytes: magic, header length, file length and
+# four further header fields; anything shorter is not a complete ANLZ header.
+MIN_FILE_HEADER = 0x1C
 TAG_HEADER_PREFIX = 12
 ENTRY_BYTES = 3
 MAX_ENTRIES = 500_000
@@ -90,6 +92,10 @@ def _decode_tag(data, offset, fourcc, tag_header_len, tag_len):
     data_end = data_start + entry_count * ENTRY_BYTES
     if data_end > offset + tag_len or data_end > len(data):
         return {'status': 'unsupported', 'format': name, 'reason': 'entries_exceed_container'}
+    # PWV6/PWV7 payloads are exactly entry_count * 3 bytes, so a count that
+    # leaves declared payload bytes unread is corrupt, not a shorter series.
+    if data_end != offset + tag_len:
+        return {'status': 'unsupported', 'format': name, 'reason': 'entry_count_mismatch'}
     mid, high, low = [], [], []
     for i in range(entry_count):
         base = data_start + i * ENTRY_BYTES
@@ -115,6 +121,7 @@ def parse_three_band(data):
         'malformed_file_header', 'no_recognized_3band_tag',
         'unexpected_tag_header_length', 'unexpected_entry_width',
         'implausible_entry_count', 'entries_exceed_container',
+        'entry_count_mismatch',
         'truncated_tag_header', 'tag_length_too_small',
         'tag_exceeds_container' and 'tag_header_length_out_of_bounds'. The
         last four are container-wide: a single malformed or truncated tag
@@ -139,7 +146,7 @@ def parse_three_band(data):
         raise TypeError('parse_three_band requires raw bytes.')
     if len(data) > MAX_FILE_BYTES:
         raise ValueError('Refusing to parse an implausibly large ANLZ buffer.')
-    if len(data) < MIN_FILE_HEADER or bytes(data[:4]) != FILE_MAGIC:
+    if len(data) < TAG_HEADER_PREFIX or bytes(data[:4]) != FILE_MAGIC:
         return {'status': 'unsupported', 'reason': 'missing_anlz_file_magic'}
     header_len = _read_u32(data, 4)
     file_len = _read_u32(data, 8)

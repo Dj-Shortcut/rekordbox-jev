@@ -23,6 +23,9 @@ import xml.etree.ElementTree as ET
 
 MAX_POSITION_MARKS = 256
 MAX_START_SECONDS = 24 * 3600
+# TotalTime is exported in whole seconds while POSITION_MARK Start is
+# fractional, so a valid cue can sit up to one second past TotalTime.
+DURATION_PRECISION_SECONDS = 1.0
 CUE_TYPE = '0'
 GREEN_CHANNEL_MARGIN = 20
 GREEN_MIN_LEVEL = 80
@@ -129,8 +132,9 @@ def green_entry_cues(track_element):
         is for the caller, and is never itself a criterion for greenness.
       - The TRACK element's own TotalTime attribute (seconds) is read once
         via track_element.get('TotalTime'). When it parses to a finite,
-        nonnegative, plausible value, any cue whose Start exceeds it is
-        rejected (reason 'start_beyond_track_duration') rather than kept as
+        nonnegative, plausible value, any cue whose Start exceeds it by
+        more than DURATION_PRECISION_SECONDS (TotalTime is whole seconds)
+        is rejected (reason 'start_beyond_track_duration') rather than kept as
         if it were still inside the track. When TotalTime is absent or
         unusable, no such rejection happens; the returned 'duration_status'
         ('known'/'missing'/'invalid') makes that explicit so a caller never
@@ -185,7 +189,7 @@ def green_entry_cues(track_element):
         if start is None:
             ignored.append({'index': index, 'reason': 'invalid_or_missing_start'})
             continue
-        if duration_status == 'known' and start > duration:
+        if duration_status == 'known' and start > duration + DURATION_PRECISION_SECONDS:
             ignored.append({'index': index, 'reason': 'start_beyond_track_duration',
                              'start_seconds': start, 'duration_seconds': duration})
             continue

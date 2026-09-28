@@ -95,6 +95,14 @@ class GreenEntryCuesTests(unittest.TestCase):
         self.assertEqual(result['ignored'][0]['reason'], 'start_beyond_track_duration')
         self.assertEqual(result['ignored'][0]['duration_seconds'], 240.0)
 
+    def test_cue_within_final_fractional_second_of_whole_second_duration_is_kept(self):
+        track = track_xml([
+            {'Name': 'End', 'Type': '0', 'Start': '240.4', 'Num': '-1', 'color': GREEN},
+        ], total_time='240')
+        result = green_entry_cues(track)
+        self.assertEqual(result['status'], 'single')
+        self.assertEqual(result['selected']['start_seconds'], 240.4)
+
     def test_cue_beyond_missing_duration_is_not_rejected_but_duration_status_is_explicit(self):
         track = track_xml([
             {'Name': 'Drop', 'Type': '0', 'Start': '9999', 'Num': '-1', 'color': GREEN},

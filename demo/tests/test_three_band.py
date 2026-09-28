@@ -26,11 +26,12 @@ def build_generic_tag(fourcc, header_len=12, tag_len=12, extra=b''):
     return fourcc + struct.pack('>II', header_len, tag_len) + extra
 
 
-def build_file(tags, file_header_len=12, file_len=None):
+def build_file(tags, file_header_len=0x1C, file_len=None):
     body = b''.join(tags)
     if file_len is None:
         file_len = file_header_len + len(body)
-    return b'PMAI' + struct.pack('>II', file_header_len, file_len) + body
+    header_fields = b'\x00' * max(0, file_header_len - 12)
+    return b'PMAI' + struct.pack('>II', file_header_len, file_len) + header_fields + body
 
 
 class ParseThreeBandTests(unittest.TestCase):
@@ -128,6 +129,18 @@ class ParseThreeBandTests(unittest.TestCase):
         self.assertEqual(result['status'], 'unsupported')
         self.assertEqual(result['reason'], 'entries_exceed_container')
 
+    def test_entry_count_leaving_payload_bytes_unparsed_is_unsupported(self):
+        payload = struct.pack('>II', 3, 1) + b'\x01\x02\x03' * 2  # claims 1 entry, holds 2
+        tag = b'PWV6' + struct.pack('>II', 0x14, 12 + len(payload)) + payload
+        result = parse_three_band(build_file([tag]))
+        self.assertEqual(result['status'], 'unsupported')
+        self.assertEqual(result['reason'], 'entry_count_mismatch')
+
+    def test_incomplete_pmai_file_header_is_unsupported(self):
+        data = build_file([build_pwv6([(1, 2, 3)])], file_header_len=12)
+        result = parse_three_band(data)
+        self.assertEqual(result, {'status': 'unsupported', 'reason': 'malformed_file_header'})
+
     def test_unexpected_tag_header_length_is_unsupported(self):
         payload = struct.pack('>II', 3, 1) + b'\x01\x02\x03'
         tag = b'PWV6' + struct.pack('>II', 16, 12 + len(payload)) + payload
@@ -163,14 +176,14 @@ class ParseThreeBandTests(unittest.TestCase):
         good = build_pwv6([(1, 2, 3)])
         leftover = b'\x01\x02\x03\x04\x05'  # fewer than 12 bytes: not a full tag header
         body = good + leftover
-        data = b'PMAI' + struct.pack('>II', 12, 12 + len(body)) + body
+        data = b'PMAI' + struct.pack('>II', 0x1C, 0x1C + len(body)) + b'\x00' * 16 + body
         result = parse_three_band(data)
         self.assertEqual(result, {'status': 'unsupported', 'reason': 'truncated_tag_header'})
 
     def test_never_reads_past_the_declared_file_length(self):
         good = build_pwv6([(9, 9, 9)])
         trailing_garbage = b'\xff' * 32
-        data = build_file([good], file_len=12 + len(good))
+        data = build_file([good], file_len=0x1C + len(good))
         result = parse_three_band(data + trailing_garbage)
         self.assertEqual(result['status'], 'parsed')
         self.assertEqual(result['entries'], 1)
