@@ -4,10 +4,10 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import sys
-import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from djjev.clock import bridge_ns
 from djjev.environment import Rekordbox, NativePreDispatch, LocalPreDispatch, native_result
 from djjev.runner import Runner
 from djjev import policy
@@ -33,7 +33,7 @@ class Native:
 
     async def call(self, role, name, **params):
         self.calls.append((role, name, deepcopy(params)))
-        self.raw['sampledAtMonotonicNS'] = time.monotonic_ns()
+        self.raw['sampledAtMonotonicNS'] = bridge_ns()
         if name == 'observe': return deepcopy(self.raw)
         result = {'verified': True, 'dispatched': name != 'openFolder26'}
         if name == 'openFolder26':

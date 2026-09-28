@@ -11,10 +11,10 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import sys
-import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from djjev.clock import bridge_ns
 from djjev import policy, state
 from djjev.environment import Rekordbox
 from djjev.runner import Runner
@@ -45,7 +45,7 @@ class StrictNativeFixture:
             def clock(value):return f'{int(value)//60:02d}:{value%60:04.1f}'
             self.raw['decks'][n-1].update(title=track['title'],displayedBPM=f"0.0% {track['bpm']:.2f}",
                 metadata=f"Fixture artist {track['bpm']:.2f} {track['key']} -{clock(remaining)} {clock(elapsed)}")
-        self.raw['sampledAtMonotonicNS']=time.monotonic_ns()
+        self.raw['sampledAtMonotonicNS']=bridge_ns()
 
     def playing(self,n):return self.raw['playingIndicators']['deck'+str(n)]
     def closed(self,n):
@@ -72,7 +72,7 @@ class StrictNativeFixture:
             return deepcopy(self.raw)
         assert role=='control'
         wire={'command':name,'clientPID':os.getpid(),**params}
-        assert type(wire['notAfterMonotonicNS']) is int and wire['notAfterMonotonicNS']>time.monotonic_ns()
+        assert type(wire['notAfterMonotonicNS']) is int and wire['notAfterMonotonicNS']>bridge_ns()
         assert wire['expectedTracks']=={str(n):self.title(n) for n in (1,2)}, 'Both native title guards required'
         self.calls.append((name,deepcopy(wire)))
         result={'dispatched':True,'verified':True}

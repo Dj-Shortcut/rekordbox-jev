@@ -34,22 +34,22 @@ jobs:
           python-version: '3.12'
       - name: Swift-toolchain
         run: swiftc --version
-      - name: Vergelijk de klok van de Swift-bridge met die van Python
-        # The bridge stamps frames with DispatchTime uptime and policy.py
-        # rejects frames more than 3 s away from Python's time.monotonic_ns.
+      - name: Controleer dat de Python-kant de klok van de Swift-bridge volgt
+        # The bridge stamps frames and checks deadlines with DispatchTime
+        # uptime; djjev.clock.bridge_ns() must agree with it on every Python
+        # the app may launch, including Apple's /usr/bin/python3.
         shell: bash
+        working-directory: demo
         run: |
           printf 'import Dispatch\nprint(DispatchTime.now().uptimeNanoseconds)\n' > "$RUNNER_TEMP/clock.swift"
           swiftc "$RUNNER_TEMP/clock.swift" -o "$RUNNER_TEMP/clock"
           for py in /usr/bin/python3 python; do
             before=$("$RUNNER_TEMP/clock")
-            py_ns=$("$py" -c 'import time; print(time.monotonic_ns())')
+            read -r raw_ns bridge_ns < <("$py" -c 'import time; from djjev.clock import bridge_ns; print(time.monotonic_ns(), bridge_ns())')
             after=$("$RUNNER_TEMP/clock")
-            echo "$py ($("$py" --version 2>&1)): swift=$before..$after python=$py_ns"
-            # Same clock: the Python reading lies between the two Swift readings.
-            if ! "$py" -c "import sys; sys.exit(0 if $before - 50_000_000 <= $py_ns <= $after + 50_000_000 else 1)"; then
-              echo "::warning::$py gebruikt een andere monotone klok dan de Swift-bridge"
-            fi
+            echo "$py ($("$py" --version 2>&1)): swift=$before..$after monotonic_ns=$raw_ns bridge_ns=$bridge_ns"
+            "$py" -c "import sys; sys.exit(0 if $before - 50_000_000 <= $bridge_ns <= $after + 50_000_000 else 1)" \
+              || { echo "::error::$py: bridge_ns() volgt de klok van de Swift-bridge niet"; exit 1; }
           done
       - name: Actieve kern met Apple's /usr/bin/python3 (terugvaloptie van de app)
         working-directory: demo

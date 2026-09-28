@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import time
 import uuid
+from .clock import bridge_ns
 from .state import normalize, read_library, number, closed, cross_closed, ENDPOINT_TOLERANCE
 from .events import emit, native_parameters, native_result_summary, snapshot_summary
 from .audio_timeline import TimelineStore
@@ -428,7 +429,7 @@ class Rekordbox:
             try:
                 control_attempted = True
                 result = await self.native.call('control', name, expectedTracks=expected,
-                    notAfterMonotonicNS=time.monotonic_ns()+55_000_000_000, **params)
+                    notAfterMonotonicNS=bridge_ns()+55_000_000_000, **params)
             except asyncio.CancelledError:
                 emit(self.native_trace, 'native_command', phase='cancelled',
                      seconds=time.monotonic()-started, **trace)
