@@ -83,7 +83,10 @@ class MusicalTimingTests(unittest.TestCase):
         self.assertTrue(request['state']['first_blend_pending'])
         questions=request['questions']
         self.assertEqual(set(questions['duration']['criteria']),{'beats2','beats4'})
-        self.assertEqual(set(questions['crossfader']['criteria']),{'hold','center'})
+        # Waiting is transport HOLD; a MIX must open the route, never hold every control.
+        self.assertEqual(set(questions['crossfader']['criteria']),{'center'})
+        with self.assertRaises(ValueError):
+            policy.resolve(request,response(request,transport='mix',crossfader='hold',duration='beats4'))
         for band in ('bass','mid','high'):
             self.assertEqual(set(questions[band]['criteria']),{'hold'})
         for action in ('mix','hold'):
@@ -106,6 +109,14 @@ class MusicalTimingTests(unittest.TestCase):
             if remaining==20.:
                 self.assertTrue(request['state']['handoff_completion_required'])
                 self.assertEqual(set(request['questions']['crossfader']['criteria']),{'B'})
+
+    def test_urgent_incoming_clock_keeps_the_handoff_endpoint(self):
+        state=self.prepared(both=True,remaining=200)
+        state['decks']['B']['remaining']=20.
+        request=policy.prepare(state,{'transition':self.anchor(state)})
+        self.assertTrue(request['state']['musical_timing']['ending_needs_priority'])
+        self.assertFalse(request['state']['first_blend_pending'])
+        self.assertIn('B',request['questions']['crossfader']['criteria'])
 
     def test_overlap_uses_time_not_hold_count_and_preserves_final_eq_cleanup(self):
         state=self.prepared(both=True,cross=.5)

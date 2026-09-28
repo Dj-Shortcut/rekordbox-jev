@@ -1,4 +1,5 @@
 """Musical pacing context for Jev, never a scheduler or replacement decision."""
+from copy import deepcopy
 from .state import number
 from .entry_timing import entry_context
 from .transition_budget import COMPLETION_MARGIN_SECONDS, LAUNCH_ALIGNMENT_RESERVE_SECONDS
@@ -121,6 +122,10 @@ def context(snapshot, transition, audible):
     if preferred_slot:
         launch_wait = preferred_slot['seconds_until']
     arrangement = arrangement_context(snapshot, lead, incoming, launch_wait)
+    # entry_fit=alternative launches in the CURRENT passage, not at the
+    # delayed candidate/fallback, so project the arrangement for that too.
+    arrangement_now = (arrangement_context(snapshot, lead, incoming, 0.)
+                       if number(launch_wait) and launch_wait > 0 else deepcopy(arrangement))
     entry_target = transition.get('entry_target', {}) if transition else {}
     target_stamp = entry_target.get('beat_monotonic_ns')
     entry_age = ((stamp-target_stamp)/1e9 if type(stamp) is int and type(target_stamp) is int else None)
@@ -129,6 +134,7 @@ def context(snapshot, transition, audible):
     return {
         'entry_preference': entry,
         'arrangement': arrangement,
+        'arrangement_if_launched_now': arrangement_now,
         'entry_grid': entry_grid,
         'seconds_since_planned_entry': entry_age,
         'confirmed_blend_after_entry_seconds': blend_after_target,

@@ -208,6 +208,19 @@ class EntryTimingTests(unittest.TestCase):
             decision=policy.resolve(req,response(req,entry_fit=assessment,**choices))
             self.assertFalse(policy.applicable(decision,state))
 
+    def test_alternative_entry_projects_arrangement_from_an_immediate_launch(self):
+        state=self.state(elapsed=44,duration=107.6)
+        for deck in state['decks'].values():deck['bpm']=122.
+        state['audio_windows']['A']['entry_structure']={
+            'status':'no_clear_return','last_return':None,'groups':[]}
+        state['audio_windows']['B'].update(status='available',tempo_ratio=1.,first_drop={
+            'status':'possible_first_drop','drop_confirmed':False,'candidate':{'source_seconds':20.}})
+        timing=policy.prepare(state)['state']['musical_timing']
+        wait=timing['seconds_until_preferred_launch_window']
+        self.assertGreater(wait,0)
+        delayed,now=timing['arrangement'],timing['arrangement_if_launched_now']
+        self.assertAlmostEqual(now['outgoing_seconds_at_drop']-delayed['outgoing_seconds_at_drop'],wait,places=2)
+
     def test_alternative_cannot_invent_evidence_or_override_an_exact_return_target(self):
         state=self.state(elapsed=100);req=policy.prepare(state)
         choices=dict(transport='play_B',entry_fit='alternative',arrangement_fit='alternative')

@@ -437,13 +437,18 @@ def prepare(snapshot, history=None, busy=False):
         and _cross_closed(snapshot, transition['incoming'])
         and number(decks[transition['incoming']]['bass'], -1., -.24)
         and _non_bass_neutral(decks[transition['incoming']])
-        and number(transition['outgoing_remaining_seconds'], COMPLETION_MARGIN_SECONDS+.001))
+        and number(transition['outgoing_remaining_seconds'], COMPLETION_MARGIN_SECONDS+.001)
+        # Either running clock inside the completion margin keeps the endpoint.
+        and not timing.get('ending_needs_priority')
+        and all(number(decks[n]['remaining'], COMPLETION_MARGIN_SECONDS+.001)
+                for n in (transition['incoming'], transition['outgoing'])))
     if first_blend_pending:
         # The user wants the successor audible promptly, not a shorter overall
         # overlap. Keep Jev's MIX/HOLD choice, but give the first opening its own
         # brief gesture and defer sequential EQ work to the next observation.
-        fader.clear(); fader.update({'hold':'Leave the route closed if entry must wait.',
-                                    'center':'Bring in the prepared successor now, keeping both tracks audible.'})
+        # Waiting is transport HOLD; with every band held, a MIX gesture must
+        # move the fader or it would verify without making the successor audible.
+        fader.clear(); fader['center']='Bring in the prepared successor now, keeping both tracks audible.'
         bass.clear(); bass['hold']='Keep the prepared bass balance for this first opening; assess the exchange after it is audible.'
         for band in ('mid','high'):
             questions[band]['criteria']={'hold':'Keep prepared neutral tone for the first opening.'}
@@ -605,6 +610,8 @@ def applicable(decision, snapshot, history=None):
             return False
         fresh=fresh_request['questions']
         for key in ('transport','crossfader','bass','mid','high'):
+            if key != 'transport' and decision['transport'] != 'mix' and decision.get(key,'hold') == 'hold':
+                continue  # Outside MIX every mixer control is held regardless of its branch.
             if decision.get(key,'hold') not in fresh.get(key,{'criteria':{'hold':None}})['criteria']:
                 return False
         if decision['transport'].startswith('load_') and decision.get('track_id') not in fresh['next_track']['criteria']:

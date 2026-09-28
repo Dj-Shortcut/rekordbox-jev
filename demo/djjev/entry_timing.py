@@ -154,6 +154,7 @@ def attach_questions(request):
                        'alternative': 'The CURRENT passage supports beginning a different blend now, '
                                       'even without the proposed final return; both arrangements and remaining '
                                       'time permit it without cutting off the outgoing development. '
+                                      'Judge its timing with musical_timing.arrangement_if_launched_now. '
                                       'This is a musical judgment, not confirmed phrase detection.',
                        'protect': 'Let this passage develop further before overlapping.',
                        'unsuitable': 'This candidate is not a suitable entry.',
@@ -182,7 +183,7 @@ def launch_consistent(decision, timing):
         # Peak/final-section answers describe the proposed return, not this
         # alternative CURRENT passage. Keep exact x-targets on their separate
         # supported-return path; never relabel an alternative as a detected x.
-        arrangement = timing.get('arrangement', {})
+        arrangement = timing.get('arrangement_if_launched_now', timing.get('arrangement', {}))
         return (not decision.get('entry_target') and bool(entry.get('evidence'))
                 and arrangement.get('incoming') is not None
                 and choices.get('arrangement_fit') in ('alternative', 'supported'))
