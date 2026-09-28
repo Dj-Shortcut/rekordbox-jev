@@ -3,10 +3,11 @@ from hashlib import sha256
 from pathlib import Path
 import math
 import re
-import time
 import unicodedata
 from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
+
+from .clock import bridge_ns
 
 BANDS = ('trim', 'high', 'mid', 'low')
 ENDPOINT_TOLERANCE = .02  # Same visual endpoint tolerance as closeStoppedDeck.
@@ -106,7 +107,7 @@ def cue_offset(track, bpm):
 
 
 def normalize(raw, library, version, *, now_ns=None):
-    now_ns = time.monotonic_ns() if now_ns is None else now_ns
+    now_ns = bridge_ns() if now_ns is None else now_ns
     raw = raw if isinstance(raw, dict) else {}
     body = raw.get('result', {}) if 'ok' in raw or 'result' in raw else raw
     body = body if isinstance(body, dict) else {}

@@ -1,6 +1,6 @@
 """Independent Jev questions over one observed DJ state. No physical controls."""
 from copy import deepcopy
-import time
+from .clock import bridge_ns
 from .state import BANDS, closed as _closed, cross_closed as _cross_closed, cue_offset, number, text
 from .musical_timing import context as musical_timing
 from .audio_timeline import transition_context, evidence_token
@@ -237,7 +237,7 @@ def _prioritize_preparation(snapshot, transport, audible, transition, busy):
 
 
 def prepare(snapshot, history=None, busy=False):
-    if not snapshot.get('valid') or not 0<=time.monotonic_ns()-snapshot['captured_ns']<=3_000_000_000:
+    if not snapshot.get('valid') or not 0<=bridge_ns()-snapshot['captured_ns']<=3_000_000_000:
         raise ValueError(snapshot.get('error', 'No valid observation.'))
     decks = snapshot['decks']; playing = [n for n in decks if decks[n]['playing']]
     recent, last_actions, hold_streak = _history(history)
@@ -514,7 +514,7 @@ def resolve(request, response):
 
 
 def applicable(decision, snapshot, history=None):
-    if (not snapshot.get('valid') or not 0<=time.monotonic_ns()-snapshot['captured_ns']<=3_000_000_000
+    if (not snapshot.get('valid') or not 0<=bridge_ns()-snapshot['captured_ns']<=3_000_000_000
             or decision.get('expected_titles')!={n:d['title'] for n,d in snapshot['decks'].items()}):
         return False
     try:

@@ -6,11 +6,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from djjev.clock import bridge_ns
 from djjev import audio_timeline as audio, policy
 from djjev.environment import Rekordbox
 from test_policy import library, loaded, raw, snapshot, response
@@ -261,7 +261,7 @@ class TimelineTests(unittest.TestCase):
         self.assertFalse(policy.applicable(chosen,state))
 
     def test_same_bar_backward_seek_hidden_by_forward_playback_rejects_answer(self):
-        state=self.state();state['captured_ns']=time.monotonic_ns()-1_000_000_000
+        state=self.state();state['captured_ns']=bridge_ns()-1_000_000_000
         for index,name in enumerate(('A','B')):
             state['decks'][name].update(self.deck(index,self.docs[index]['grid']['start_seconds']+.2))
         state['audio_windows']=self.store.snapshot_context(state)

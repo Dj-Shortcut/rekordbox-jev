@@ -39,7 +39,7 @@ class EntryTimingTests(unittest.TestCase):
         decision=policy.resolve(req,response(req,transport='stop_A'))
         after=deepcopy(state)
         after['captured_ns']+=1_000_000_000
-        with __import__('unittest.mock',fromlist=['patch']).patch('djjev.policy.time.monotonic_ns',return_value=after['captured_ns']):
+        with __import__('unittest.mock',fromlist=['patch']).patch('djjev.policy.bridge_ns',return_value=after['captured_ns']):
             self.assertTrue(policy.applicable(decision,after))
             after['decks']['A']['elapsed']-=2
             self.assertFalse(policy.applicable(decision,after))

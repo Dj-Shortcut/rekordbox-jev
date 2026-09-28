@@ -36,7 +36,7 @@ Zie [HANDOFF.md](HANDOFF.md) voor de concrete problemen.
 
 ## Ontwikkeling
 
-Getest met Rekordbox 6.8.7 op Apple Silicon. Swift-builds richten zich op macOS 14+. Benodigd: Xcode command-line tools en een Homebrew-Python (`/opt/homebrew/bin/python3`, CI test 3.9–3.13). Apple's eigen `/usr/bin/python3` werkt niet voor een live set: de CI meet dat zijn `time.monotonic_ns()` per proces begint, terwijl de Swift-bridge frames met systeem-uptime stempelt, zodat elke waarneming als verouderd wordt afgewezen. De app valt zonder Homebrew-Python toch op die Python terug. Alleen de optionele MP3-energieanalyse vereist `numpy` en `soundfile`.
+Getest met Rekordbox 6.8.7 op Apple Silicon. Swift-builds richten zich op macOS 14+. Benodigd: Xcode command-line tools en Python 3.9+ (CI test 3.9–3.13 en Apple's `/usr/bin/python3`, waarop de app zonder Homebrew-Python terugvalt). Apple's Python telt `time.monotonic_ns()` vanaf de processtart, terwijl de Swift-bridge frames en deadlines met systeem-uptime vergelijkt; `demo/djjev/clock.py` zet de Python-klok daarom op die uptime-klok. Alleen de optionele MP3-energieanalyse vereist `numpy` en `soundfile`.
 
 ```sh
 python3 -m unittest discover -s tests -v

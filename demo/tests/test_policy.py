@@ -3,9 +3,9 @@ import copy
 from pathlib import Path
 import sys
 import tempfile
-import time
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from djjev.clock import bridge_ns
 from djjev import policy, state
 
 
@@ -17,7 +17,7 @@ def library():
 
 
 def raw():
-    return {'layoutCalibrated':True,'sampledAtMonotonicNS':time.monotonic_ns(),
+    return {'layoutCalibrated':True,'sampledAtMonotonicNS':bridge_ns(),
         'browserHeading':'26','decks':[{'deck':n,'title':'Not Loaded','metadata':'','displayedBPM':''} for n in (1,2)],
         'playingIndicators':{'deck1':False,'deck2':False},'faders':{'deck1':1,'deck2':1},
         'mixer':{'crossfader_position':.5,'deck_assignments':{'1':'left','2':'right'},'red_bar_aligned':False,
@@ -409,7 +409,7 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(policy.applicable(decision,ended,[]))
         changed=snapshot(loaded(raw(),index=1))
         self.assertFalse(policy.applicable(decision,changed,[]))
-        s['captured_ns']=time.monotonic_ns()-4_000_000_000
+        s['captured_ns']=bridge_ns()-4_000_000_000
         self.assertFalse(policy.applicable(decision,s,[]))
         with self.assertRaises(ValueError):policy.prepare(s,[],False)
 
