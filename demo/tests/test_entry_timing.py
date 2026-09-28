@@ -157,6 +157,91 @@ class EntryTimingTests(unittest.TestCase):
         self.assertFalse(policy.applicable(self.decision(req),earlier))
         self.assertIn('hold',req['questions']['transport']['criteria'])
 
+    def test_recorded_two_faced_opener_has_blend_room_before_completion(self):
+        # 2026-09-28: Two Faced (107.6 s, 122 BPM) had no detected return.
+        # The old 26.9 s fallback started B with 24.8 s left and forced the
+        # very first MIX straight to the endpoint, with incoming bass cut.
+        state=self.state(elapsed=61.8,duration=107.6)
+        for deck in state['decks'].values():deck['bpm']=122.
+        state['audio_windows']['A']['entry_structure']={
+            'status':'no_clear_return','last_return':None,'groups':[{
+                'start_seconds':.281,'end_seconds':102.576,'start_bar':0,'bars':52.}]}
+        req=policy.prepare(state);timing=req['state']['musical_timing']
+        self.assertTrue(timing['fallback_budget_overrides_percentage'])
+        self.assertAlmostEqual(timing['launch_window_remaining_seconds'],30+8+16*60/122)
+        self.assertEqual(timing['seconds_until_preferred_launch_window'],0)
+        self.assertTrue(timing['ending_needs_priority'])
+        selected=policy.resolve(req,response(req,transport='play_B',kick_pattern='unclear',
+            last_section='unknown',post_peak='unknown',entry_fit='protect',arrangement_fit='alternative'))
+        self.assertTrue(policy.applicable(selected,state))
+        # Even consuming the full eight-second launch reserve leaves the
+        # center blend available, rather than forcing immediate completion.
+        playing=deepcopy(state)
+        playing['decks']['A'].update(elapsed=69.8,remaining=37.8)
+        playing['audio_windows']['A']['position_seconds']=69.8
+        playing['decks']['B'].update(playing=True,elapsed=8.,remaining=196.6)
+        playing['mixer']['aligned']=True
+        history={'transition':timing_fixtures.MusicalTimingTests().anchor(playing)}
+        mix=policy.prepare(playing,history)
+        self.assertFalse(mix['state']['handoff_completion_required'])
+        self.assertIn('center',mix['questions']['crossfader']['criteria'])
+        self.assertAlmostEqual(mix['state']['musical_timing']['overlap_time_available_before_finish_seconds'],7.8)
+
+    def test_user_44_second_reference_is_not_vetoed_by_percentage_or_missing_return(self):
+        # User listening reference, NOT a claim that our detector finds this
+        # phrase. Exercise the choice gate: a supported alternative may pass;
+        # unknown suitability must not become an automatic early launch.
+        state=self.state(elapsed=44,duration=107.6)
+        for deck in state['decks'].values():deck['bpm']=122.
+        state['audio_windows']['A']['entry_structure']={
+            'status':'no_clear_return','last_return':None,'groups':[{
+                'start_seconds':.281,'end_seconds':102.576,'start_bar':0,'bars':52.}]}
+        req=policy.prepare(state)
+        self.assertGreater(req['state']['musical_timing']['seconds_until_fallback_launch_window'],0)
+        self.assertFalse(req['state']['musical_timing']['ending_needs_priority'])
+        choices=dict(transport='play_B',kick_pattern='unclear',last_section='unknown',
+                     post_peak='unknown',arrangement_fit='alternative')
+        alternate=policy.resolve(req,response(req,entry_fit='alternative',**choices))
+        self.assertTrue(policy.applicable(alternate,state))
+        self.assertIsNone(alternate.get('entry_target'))
+        for assessment in ('unknown','protect','unsuitable'):
+            decision=policy.resolve(req,response(req,entry_fit=assessment,**choices))
+            self.assertFalse(policy.applicable(decision,state))
+
+    def test_alternative_entry_projects_arrangement_from_an_immediate_launch(self):
+        state=self.state(elapsed=44,duration=107.6)
+        for deck in state['decks'].values():deck['bpm']=122.
+        state['audio_windows']['A']['entry_structure']={
+            'status':'no_clear_return','last_return':None,'groups':[]}
+        state['audio_windows']['B'].update(status='available',tempo_ratio=1.,first_drop={
+            'status':'possible_first_drop','drop_confirmed':False,'candidate':{'source_seconds':20.}})
+        timing=policy.prepare(state)['state']['musical_timing']
+        wait=timing['seconds_until_preferred_launch_window']
+        self.assertGreater(wait,0)
+        delayed,now=timing['arrangement'],timing['arrangement_if_launched_now']
+        self.assertAlmostEqual(now['outgoing_seconds_at_drop']-delayed['outgoing_seconds_at_drop'],wait,places=2)
+
+    def test_alternative_cannot_invent_evidence_or_override_an_exact_return_target(self):
+        state=self.state(elapsed=100);req=policy.prepare(state)
+        choices=dict(transport='play_B',entry_fit='alternative',arrangement_fit='alternative')
+        d=policy.resolve(req,response(req,**choices))
+        from djjev.entry_timing import launch_consistent
+        timing=req['state']['musical_timing']
+        self.assertFalse(launch_consistent({**d,'entry_target':{'id':'x2'}},timing))
+        state['audio_windows']['A'].pop('entry_structure')
+        req=policy.prepare(state)
+        self.assertFalse(policy.applicable(policy.resolve(req,response(req,**choices)),state))
+
+    def test_short_fallback_reserves_wall_time_at_faster_tempo_and_caps_at_file_length(self):
+        for duration,ratio in ((107.6,1.06),(30.,1.)):
+            state=self.state(elapsed=10,duration=duration)
+            state['audio_windows']['A']['entry_structure']={'status':'no_clear_return','groups':[],'last_return':None}
+            state['audio_windows']['A']['tempo_ratio']=ratio
+            for deck in state['decks'].values():deck['bpm']=122*ratio
+            timing=policy.prepare(state)['state']['musical_timing']
+            minimum=(30+8+16*60/(122*ratio))*ratio
+            self.assertAlmostEqual(timing['launch_window_remaining_seconds'],min(duration,minimum))
+
     def test_running_successor_does_not_pay_launch_reserve_twice(self):
         state=self.state(elapsed=360)
         state['decks']['B']['playing']=True

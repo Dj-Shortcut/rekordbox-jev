@@ -21,9 +21,11 @@ AUDIO_GUIDANCE = ('Use audio_context to serve the musical-development intent bel
     'or an upcoming change does not establish that the outgoing track has delivered its main development. '
     'Compare earlier, current and later passages before interpreting a sustained relaxation. '
     'A contour describes positions in the file, not proof the listener heard them; a seek can skip them. '
-    'No RMS maximum or measured change alone proves a musical climax. If post-development evidence is '
-    'unclear, keep the prepared successor stopped and use the conservative late-track window, unless '
-    'continuity is urgent. Once a transition is musically appropriate, choose its length and gestures '
+    'No RMS maximum or measured change alone proves a musical climax. A missing final-return label '
+    'does not rule out a supported alternative entry in the CURRENT passage: assess both tracks '
+    'and distinguish beginning a blend from finishing the outgoing track. If suitability itself '
+    'is unclear, use the conservative time-budgeted fallback unless continuity is urgent. '
+    'Once a transition is musically appropriate, choose its length and gestures '
     'from the local structure and duration preferences. A coming source low-band rise or fall can inform the timing of '
     'your bass exchange; consider both decks and their current EQ/routes. No measurement forces a '
     'particular action or bass threshold. Choose the existing bounded targets yourself. '
@@ -37,7 +39,9 @@ PACING = ('FOLDER-26 ENTRY PREFERENCE: xxx____xxxxxx_____xxxxxx; prefer starting
          'musical_timing.entry_preference. Its candidate is measured low-band/attack activity, not '
          'proof of kicks or a climax. Assess all earlier and later sections, and reject misleading candidates. '
          'When plausible, suitable and enough_time_for_short_mix is true, wait for that return even '
-         'beyond the final-quarter fallback. Otherwise use the fallback and its urgency. '
+         'beyond the final-quarter fallback. A different suitable CURRENT passage can take priority '
+         'over this return template and over the percentage fallback: choose entry_fit=alternative '
+         'and assess arrangement_fit independently. Only uncertain entry suitability needs the fallback. '
          'Budget launch/alignment separately from the 30-second completion reserve. '
          'A seven-minute song may keep playing on its own until its late musical entry. '
          'Do not start early merely to fit the preferred 64 bars; shorten the mix to the candidate budget. '
@@ -55,11 +59,16 @@ PACING = ('FOLDER-26 ENTRY PREFERENCE: xxx____xxxxxx_____xxxxxx; prefer starting
          'incoming intro is a reason to start it. PLAY starts a time-limited successor from its beginning: '
          'do not launch it minutes early and let its intro run out while waiting. '
          'After preparation and EQ cleanup, normally HOLD while seconds_until_preferred_launch_window '
-         'is positive, EXCEPT when an agreed entry_slot is armable: choose PLAY 3–8 seconds ahead '
+         'is positive, EXCEPT for a supported alternative CURRENT entry or when an agreed entry_slot '
+         'is armable: for an explicit slot choose PLAY 3–8 seconds ahead '
          'so native control can wait for that selected beat. Never wait until an agreed point passes '
-         'before requesting its start. Without reliable arrangement evidence, use the final-quarter fallback in '
+         'before requesting its start. Without reliable arrangement evidence, use the time-budgeted fallback in '
          'launch_window_remaining_seconds and launch_progress_floor_preference. These are musical '
-         'pacing preferences, not proof a climax has happened. An earlier opportunity needs reliable '
+         'pacing preferences, not proof a climax has happened. If fallback_budget_overrides_percentage '
+         'is true, this short track cannot fit launch, a four-bar blend and completion inside its final '
+         'quarter: the computed earlier window takes priority, without pretending its climax is known. '
+         'At ending_needs_priority, start the prepared successor instead of waiting for a later grid hint '
+         'or protecting an unverified passage until only an emergency handoff remains. Otherwise an earlier opportunity needs reliable '
          'evidence of a developed outgoing passage relaxing, not merely a convenient local change, '
          'a grid boundary, a ready successor or the desire to fit a long overlap. '
          'Within that approximate late-track window, prefer an available near_16_bar_group hint for PLAY. '
@@ -423,6 +432,39 @@ def prepare(snapshot, history=None, busy=False):
         questions['bass'] = {'type':'choice','instructions':'Assume transport MIX is selected. Which complementary bass balance should this gesture reach? Choose a light, medium or deep exchange for the passages and remaining time. You may retain the outgoing bass, exchange directly, or briefly share reduction; none is a mandatory stage. Avoid the same sequence on every pair. HOLD is a musical choice, not lack of creativity. Give the incoming track neutral bass toward the handoff. Read musical_timing and transition; do not repeatedly swap bass back and forth. The prepared incoming bass cut is temporary; a completed handoff must leave the new audible track at neutral bass, never still reduced. HOLD preserves the current bass values, including any cut, so it does not restore bass when the fader moves. Read transition.incoming and incoming_non_neutral_bands when known. Answer this MIX branch independently; it is ignored if MIX is not selected.', 'criteria':bass}
         questions['duration'] = {'type':'choice','instructions':'Assume transport MIX is selected. How many beats should this one mixer gesture last? Prefer smooth 8 or 16 beat gestures when time permits; 2 or 4 beats are for short corrections or an urgent ending. This is not the whole mix duration: a 32-, 64-bar or longer blend consists of bounded gestures and HOLD between them. Read musical_timing duration preferences and both running decks remaining time; this answer is ignored outside MIX.',
                                  'criteria': {k:f'{v} beats for this gesture.' for k,v in DURATIONS.items()}}
+    first_blend_pending = bool(not busy and transition and not transition['handoff_endpoint_reached']
+        and 'center' in fader and 'mix' in transport
+        and _cross_closed(snapshot, transition['incoming'])
+        and number(decks[transition['incoming']]['bass'], -1., -.24)
+        and _non_bass_neutral(decks[transition['incoming']])
+        and number(transition['outgoing_remaining_seconds'], COMPLETION_MARGIN_SECONDS+.001)
+        # Either running clock inside the completion margin keeps the endpoint.
+        and not timing.get('ending_needs_priority')
+        and all(number(decks[n]['remaining'], COMPLETION_MARGIN_SECONDS+.001)
+                for n in (transition['incoming'], transition['outgoing'])))
+    if first_blend_pending:
+        # The user wants the successor audible promptly, not a shorter overall
+        # overlap. Keep Jev's MIX/HOLD choice, but give the first opening its own
+        # brief gesture and defer sequential EQ work to the next observation.
+        # Waiting is transport HOLD; with every band held, a MIX gesture must
+        # move the fader or it would verify without making the successor audible.
+        fader.clear(); fader['center']='Bring in the prepared successor now, keeping both tracks audible.'
+        bass.clear(); bass['hold']='Keep the prepared bass balance for this first opening; assess the exchange after it is audible.'
+        for band in ('mid','high'):
+            questions[band]['criteria']={'hold':'Keep prepared neutral tone for the first opening.'}
+        questions['duration']['criteria']={k:v for k,v in questions['duration']['criteria'].items()
+                                           if DURATIONS[k]<=4}
+        questions['duration']['instructions']=(
+            'FIRST AUDIBLE ENTRY: choose a smooth 2- or 4-beat opening to center, preferably 4. '
+            'This overrides the general 8/16-beat gesture preference for this opening only. '
+            'It does not shorten the subsequent overlap or jump to the incoming endpoint. '
+            'This answer is ignored outside MIX.')
+        questions['transport']['instructions']=(
+            'FIRST AUDIBLE ENTRY PENDING: the prepared successor has started, both decks are aligned, '
+            'but its route is still closed. Prefer MIX with center now; do not wait for the overlap '
+            'duration or incoming drop while it plays unheard. Keep EQ unchanged for this quick '
+            'opening, then assess the bass exchange once audible. HOLD remains available if the '
+            'current musical evidence makes this entrance unsuitable. ' + questions['transport']['instructions'])
     handoff_due = bool(not busy and aligned and transition
         and not transition['handoff_endpoint_reached']
         and number(transition['outgoing_remaining_seconds'],0,COMPLETION_MARGIN_SECONDS)
@@ -451,7 +493,8 @@ def prepare(snapshot, history=None, busy=False):
     prepared = [n for n in decks if playing and 'play_'+n in transport and _closed(snapshot,n) and not decks[n]['playing']]
     countdown = (max(decks[n]['remaining'] for n in audible)
                  if audible and all(number(decks[n]['remaining'],0) for n in audible) else (None if audible else 0.))
-    request = {'model':'jev-latest', 'state': {'goal':GOAL, 'handoff_completion_required':handoff_due, 'snapshot_version':snapshot['version'],
+    request = {'model':'jev-latest', 'state': {'goal':GOAL, 'first_blend_pending':first_blend_pending,
+        'handoff_completion_required':handoff_due, 'snapshot_version':snapshot['version'],
         'captured_ns':snapshot['captured_ns'], 'expected_titles':{n:d['title'] for n,d in decks.items()},
         'decks':deepcopy(decks), 'mixer':deepcopy(snapshot['mixer']), 'busy':bool(busy), 'effects':deepcopy(snapshot.get('effects',{})),
         'time_units':'All deck elapsed/remaining and continuity countdown values are seconds, not beats or bars.',
@@ -567,6 +610,8 @@ def applicable(decision, snapshot, history=None):
             return False
         fresh=fresh_request['questions']
         for key in ('transport','crossfader','bass','mid','high'):
+            if key != 'transport' and decision['transport'] != 'mix' and decision.get(key,'hold') == 'hold':
+                continue  # Outside MIX every mixer control is held regardless of its branch.
             if decision.get(key,'hold') not in fresh.get(key,{'criteria':{'hold':None}})['criteria']:
                 return False
         if decision['transport'].startswith('load_') and decision.get('track_id') not in fresh['next_track']['criteria']:

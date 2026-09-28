@@ -350,6 +350,24 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(confirmed['captured_ns'],result['snapshot']['captured_ns'])
                 self.assertTrue(result['snapshot']['decks'][incoming]['eq_neutral']['low'])
 
+    async def test_next_bar_launch_skips_rewind_only_when_already_at_start(self):
+        for elapsed in ('00:00.0','00:10.0'):
+            frame=both();frame['playingIndicators']['deck2']=False
+            frame['mixer']['crossfader_position']=0.;low(frame,2,-.35)
+            frame['decks'][1]['metadata']='Artist 124.00 Em -05:00.0 '+elapsed
+            native=Native(frame);original=native.call
+            async def with_rewind(role,name,**params):
+                if name=='action' and params['action']=='deck2.start':
+                    native.raw['decks'][1]['metadata']='Artist 124.00 Em -05:00.0 00:00.0'
+                return await original(role,name,**params)
+            native.call=with_rewind
+            env=Rekordbox(native,library())
+            result=await env.execute(decision(transport='play_B'),env.snapshot(frame))
+            self.assertTrue(result['verified'])
+            expected=['launchAligned'] if elapsed=='00:00.0' else ['action','launchAligned']
+            self.assertEqual([name for _,name,_ in native.physical],expected)
+            self.assertTrue(result['snapshot']['decks']['B']['playing'])
+
     async def test_early_center_needs_prepared_bass_and_neutral_non_bass(self):
         for unprepared in ('bass','mid'):
             frame=both();frame['mixer']['crossfader_position']=0.

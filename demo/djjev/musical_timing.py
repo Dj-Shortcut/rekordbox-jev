@@ -1,4 +1,5 @@
 """Musical pacing context for Jev, never a scheduler or replacement decision."""
+from copy import deepcopy
 from .state import number
 from .entry_timing import entry_context
 from .transition_budget import COMPLETION_MARGIN_SECONDS, LAUNCH_ALIGNMENT_RESERVE_SECONDS
@@ -67,11 +68,25 @@ def context(snapshot, transition, audible):
     shorter = shorter_bars * bar_seconds if bar_seconds else None
     # This is a soft style window; native safety and Jev's choice remain separate.
     window = preferred + 16 * bar_seconds if bar_seconds else None
-    # A long desired overlap must not pull entry into the first half of a song.
-    # For the 300.4 s / 123 BPM live regression, 80 bars meant entry at 144.3 s.
-    # Limit that soft window to the final quarter; Jev can shorten the blend.
+    # A long preferred overlap does not justify an early launch. But the final
+    # quarter must still fit launch/alignment, four blend bars and completion:
+    # 25% of the recorded 107.6 s opener was less than completion alone.
+    minimum_launch_seconds = (COMPLETION_MARGIN_SECONDS + LAUNCH_ALIGNMENT_RESERVE_SECONDS
+                              + 4 * bar_seconds if bar_seconds else None)
+    source = (snapshot.get('audio_windows') or {}).get(lead, {})
+    ratio = source.get('tempo_ratio')
+    if not number(ratio, .94, 1.06):
+        original = next((t.get('bpm') for t in snapshot['library'] if t['id']==deck.get('track_id')), None)
+        ratio = bpm/original if number(bpm,60,200) and number(original,60,200) else None
+    # Displayed remaining time is a source clock. Never under-budget a faster
+    # deck; unknown pitch gets the maximum supported speed conservatively.
+    reserve_ratio = max(1.,ratio) if number(ratio,.94,1.06) else 1.06
+    minimum_source_seconds = minimum_launch_seconds*reserve_ratio if minimum_launch_seconds is not None else None
+    budget_override = False
     if window is not None and number(total, 0) and total > 0:
         window = min(window, total * (1 - LAUNCH_PROGRESS_FLOOR))
+        budget_override = window < minimum_source_seconds
+        window = min(total,max(window,minimum_source_seconds))
     since = transition.get('audible_mix_started_ns') if transition else None
     stamp = snapshot.get('captured_ns')
     overlap = ((stamp - since) / 1e9 if type(since) is int and type(stamp) is int
@@ -107,6 +122,10 @@ def context(snapshot, transition, audible):
     if preferred_slot:
         launch_wait = preferred_slot['seconds_until']
     arrangement = arrangement_context(snapshot, lead, incoming, launch_wait)
+    # entry_fit=alternative launches in the CURRENT passage, not at the
+    # delayed candidate/fallback, so project the arrangement for that too.
+    arrangement_now = (arrangement_context(snapshot, lead, incoming, 0.)
+                       if number(launch_wait) and launch_wait > 0 else deepcopy(arrangement))
     entry_target = transition.get('entry_target', {}) if transition else {}
     target_stamp = entry_target.get('beat_monotonic_ns')
     entry_age = ((stamp-target_stamp)/1e9 if type(stamp) is int and type(target_stamp) is int else None)
@@ -115,6 +134,7 @@ def context(snapshot, transition, audible):
     return {
         'entry_preference': entry,
         'arrangement': arrangement,
+        'arrangement_if_launched_now': arrangement_now,
         'entry_grid': entry_grid,
         'seconds_since_planned_entry': entry_age,
         'confirmed_blend_after_entry_seconds': blend_after_target,
@@ -132,6 +152,8 @@ def context(snapshot, transition, audible):
         'preferred_overlap_seconds': preferred,
         'shorter_overlap_seconds': shorter,
         'launch_progress_floor_preference': LAUNCH_PROGRESS_FLOOR,
+        'fallback_budget_overrides_percentage': budget_override,
+        'minimum_launch_budget_seconds': minimum_launch_seconds,
         'launch_window_remaining_seconds': window,
         'seconds_until_preferred_launch_window': launch_wait,
         'completion_reserve_seconds': COMPLETION_MARGIN_SECONDS,
@@ -150,8 +172,9 @@ def context(snapshot, transition, audible):
                         'not muted playback or the number of HOLD answers. '
                         'confirmed_blend_after_entry_seconds is the conservative after-frame delay '
                         'from a planned silent launch, not a measured audio onset. Entry window is approximate '
-                        'using displayed remaining time and current tempo, capped to the final quarter '
-                        'when total duration is known. This is a conservative style fallback, not detected '
+                        'using displayed remaining time and current tempo. The final quarter is a style '
+                        'preference; short tracks enter earlier when it cannot fit launch/alignment, '
+                        'four blend bars and completion. This is a conservative time budget, not detected '
                         'song structure or proof a climax was heard. Long overlap and grid hints do not '
                         'justify earlier entry. The shorter known track sets the overlap preference. '
                         'The smaller remaining clock of the running decks limits the blend, reserving '

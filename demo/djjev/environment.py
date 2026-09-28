@@ -577,10 +577,11 @@ class Rekordbox:
                         reject_state('Inzet vereist gesloten crossfaderroute, open kanalen, neutrale trim/high/mid en bevestigde master/sync/BPM.')
                     if incoming['playing']:
                         await transport(d,False)
-                    # A prepared stopped deck already at zero needs no rewind
-                    # immediately before its chosen beat. Otherwise verify the
+                    # A prepared stopped deck already at zero needs no rewind,
+                    # whether launching at an explicit target or the next bar.
+                    # Otherwise verify the
                     # rewind once and never retry it to rescue a missed target.
-                    if not target or not number(incoming['elapsed'],0,.05):
+                    if kind != 'play' or incoming['playing'] is not False or not number(incoming['elapsed'],0,.05):
                         await command('action',action=f'deck{n}.start')
                         await confirm(lambda s: s['decks'][d]['playing'] is False
                             and number(s['decks'][d]['elapsed'], 0, .2),

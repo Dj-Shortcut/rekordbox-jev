@@ -175,6 +175,8 @@ class FixtureChoices:
             outgoing='B' if incoming=='A' else 'A'
             if 'align_'+incoming in options:
                 choose('align',incoming)
+            elif request['state'].get('first_blend_pending'):
+                selected.update(transport='mix',crossfader='center',bass='hold',duration='beats4')
             elif abs(request['state']['mixer']['cross']-(0 if incoming=='A' else 1))<=.01:
                 choose('stop',outgoing)
             else:
@@ -231,6 +233,12 @@ class FullSetContractTests(unittest.IsolatedAsyncioTestCase):
         mixes=[e for e in verified if e['decision']['crossfader'] in ('A','B')]
         self.assertEqual(len(mixes),2)
         self.assertEqual([e['decision']['crossfader'] for e in mixes],['A','B'])
+        openings=[e for e in verified if e['decision']['crossfader']=='center']
+        self.assertEqual(len(openings),2)
+        for opening,endpoint in zip(openings,mixes):
+            self.assertLess(verified.index(opening),verified.index(endpoint))
+            self.assertEqual(opening['decision']['duration_beats'],4)
+            self.assertEqual(opening['decision']['bass'],'hold')
         self.assertEqual(choices[0],'stop_A')
         self.assertIn('align_A',choices);self.assertIn('align_B',choices)
         self.assertEqual(choices[-1],'prepare_A')

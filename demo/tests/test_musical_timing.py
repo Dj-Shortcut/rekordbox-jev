@@ -76,6 +76,48 @@ class MusicalTimingTests(unittest.TestCase):
         decision=policy.resolve(request,response(request,transport='mix',crossfader='B',bass='hold',duration='beats2'))
         self.assertTrue(policy.applicable(decision,state,{'transition':self.anchor(state)}))
 
+    def test_first_audible_entry_is_brief_without_shortening_full_overlap(self):
+        state=self.prepared(both=True)
+        history={'transition':self.anchor(state)}
+        request=policy.prepare(state,history)
+        self.assertTrue(request['state']['first_blend_pending'])
+        questions=request['questions']
+        self.assertEqual(set(questions['duration']['criteria']),{'beats2','beats4'})
+        # Waiting is transport HOLD; a MIX must open the route, never hold every control.
+        self.assertEqual(set(questions['crossfader']['criteria']),{'center'})
+        with self.assertRaises(ValueError):
+            policy.resolve(request,response(request,transport='mix',crossfader='hold',duration='beats4'))
+        for band in ('bass','mid','high'):
+            self.assertEqual(set(questions[band]['criteria']),{'hold'})
+        for action in ('mix','hold'):
+            d=policy.resolve(request,response(request,transport=action,crossfader='center',duration='beats4'))
+            self.assertTrue(policy.applicable(d,state,history))
+        preferred=request['state']['musical_timing']['preferred_overlap_seconds']
+        state['mixer']['cross']=.5
+        opened=policy.prepare(state,history)
+        self.assertFalse(opened['state']['first_blend_pending'])
+        self.assertIn('beats16',opened['questions']['duration']['criteria'])
+        self.assertGreater(len(opened['questions']['bass']['criteria']),1)
+        self.assertEqual(opened['state']['musical_timing']['preferred_overlap_seconds'],preferred)
+
+    def test_first_entry_optimization_does_not_override_completion_or_unprepared_eq(self):
+        for bass,remaining in ((-.1,100.),(-.35,20.)):
+            state=self.prepared(both=True,remaining=remaining)
+            state['decks']['B']['bass']=bass
+            request=policy.prepare(state,{'transition':self.anchor(state)})
+            self.assertFalse(request['state']['first_blend_pending'])
+            if remaining==20.:
+                self.assertTrue(request['state']['handoff_completion_required'])
+                self.assertEqual(set(request['questions']['crossfader']['criteria']),{'B'})
+
+    def test_urgent_incoming_clock_keeps_the_handoff_endpoint(self):
+        state=self.prepared(both=True,remaining=200)
+        state['decks']['B']['remaining']=20.
+        request=policy.prepare(state,{'transition':self.anchor(state)})
+        self.assertTrue(request['state']['musical_timing']['ending_needs_priority'])
+        self.assertFalse(request['state']['first_blend_pending'])
+        self.assertIn('B',request['questions']['crossfader']['criteria'])
+
     def test_overlap_uses_time_not_hold_count_and_preserves_final_eq_cleanup(self):
         state=self.prepared(both=True,cross=.5)
         anchor=self.anchor(state)
@@ -308,7 +350,8 @@ class MusicalTimingTests(unittest.TestCase):
             state=self.prepared(elapsed=duration*.5,remaining=duration*.5)
             timing=policy.prepare(state)['state']['musical_timing']
             self.assertGreater(timing['seconds_until_preferred_launch_window'],0)
-            self.assertLessEqual(timing['launch_window_remaining_seconds'],duration*.25)
+            self.assertLessEqual(timing['launch_window_remaining_seconds'],
+                                 max(duration*.25,timing['minimum_launch_budget_seconds']))
         state=self.prepared(elapsed=295,remaining=5)
         request=policy.prepare(state)
         self.assertTrue(request['state']['musical_timing']['ending_needs_priority'])
